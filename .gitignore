@@ -1,0 +1,7 @@
+.DS_Store
+__pycache__/
+*.pyc
+*.pyo
+
+# artefatto buildato: si ricrea con ./build.sh, non va in git (~1GB col python embeddato)
+Gephid.app/
