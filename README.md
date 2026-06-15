@@ -32,8 +32,10 @@ double-clickable app. The diffusion model runs locally on your Mac (Apple Silico
 - Light/dark/system themes. **Hot-swap** the model (no restart).
 
 ## Usage
-Open **Gephid** (from `/Applications` or double-click the `.app`). On first launch the model loads
-(~15–30s). Type, attach files with the paperclip, export or compact from each message's menu.
+Open **Gephid** (from `/Applications` or double-click the `.app`). The window appears right away
+with a loading overlay while the model loads into memory (a few seconds; longer on the very first
+launch if it still needs to download); then it's ready. Type, attach files with the paperclip,
+export or compact from each message's menu.
 
 Settings (top icon): theme, dictation, denoising steps (quality↔speed), max tokens, and model
 selection among those already on your Mac.

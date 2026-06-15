@@ -32,9 +32,10 @@ cliccabile. Il modello a diffusione gira in locale sul tuo Mac (Apple Silicon).
 - Temi chiaro/scuro/sistema. Cambio modello **a caldo** (senza riavviare).
 
 ## Uso
-Apri **Gephid** (da `/Applications` o doppio click sulla `.app`). Al primo avvio il modello si
-carica (~15–30s). Scrivi, allega file con la graffetta, esporta o compatta dal menu di ogni
-messaggio.
+Apri **Gephid** (da `/Applications` o doppio click sulla `.app`). La finestra appare subito con un
+overlay di caricamento mentre il modello entra in memoria (qualche secondo; di più al primissimo
+avvio se deve ancora scaricarlo); poi è pronta. Scrivi, allega file con la graffetta, esporta o
+compatta dal menu di ogni messaggio.
 
 Impostazioni (icona in alto): tema, dettatura, step di denoising (qualità↔velocità), max token,
 e selezione del **modello** tra quelli già sul tuo Mac.
