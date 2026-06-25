@@ -4,7 +4,7 @@
 
 A native macOS (Apple Silicon) app that gives DiffusionGemma a ChatGPT-style chat, 100% offline,
 wrapped in a single `.app`. The model stays external and configurable.
-Name: **Ge**mma + **diffusion**, written like "sapphire".
+Name: **Ge**mma + **diffusion**.
 
 ## Layout
 ```
@@ -64,7 +64,7 @@ Gephid/
 - **cgo + ARC**: the cgo block is compiled with `-fobjc-arc` (without it, dictation stored an
   autorelease `NSString` in a static → use-after-free → crash). Do not remove it.
 - **Block diffusion**: the model generates 256-token "canvases" and refines them over `steps`
-  (denoising). Low step counts degenerate into repetition on long text → `STEP_MIN=16`, default 32;
+  (denoising). Low step counts degenerate into repetition on long text → `STEP_MIN=16`, default 48;
   the `_degenerate` guard stops pathological repetition. Frontend: typewriter (rAF) with markdown
   rendered live and the diffusion visible as the block forms.
 - **Runtime**: `mlx-vlm` only (`mlx-lm` gives `Model type diffusion_gemma not supported`); test venv

@@ -142,8 +142,13 @@ def stream_job(job, emit):
     while True:
         try:
             ev = job.q.get(timeout=JOB_EVENT_TIMEOUT)
-        except queue.Empty:  # nessun evento per troppo tempo -> worker bloccato
-            emit({"error": "Il motore locale non risponde. Riavvia Gephid."}); job.cancel.set(); break
+        except queue.Empty:  # nessun evento per troppo tempo -> worker incastrato e non recuperabile
+            job.cancel.set()
+            if IS_BUNDLED:  # nel bundle: esco, così la supervisione del launcher riavvia un backend pulito
+                emit({"error": "Il motore locale si è bloccato, lo riavvio."})
+                print("worker bloccato oltre il timeout -> esco, il launcher riavvia il backend", flush=True)
+                os._exit(1)
+            emit({"error": "Il motore locale non risponde. Riavvia Gephid."}); break
         if ev[0] == "end": break
         ok = True
         if ev[0] == "delta": ok = emit({"delta": ev[1]})
@@ -210,7 +215,9 @@ def inject_system(messages):
     sp = (CFG.get("system_prompt") or "").strip()
     if not sp or not messages: return messages
     out = [dict(m) for m in messages]
-    for m in out:
+    # ultimo turno utente: le istruzioni stanno subito PRIMA della domanda corrente, non sepolte
+    # in cima a un eventuale riassunto cumulativo (un modello a diffusione le segue molto di più).
+    for m in reversed(out):
         if m.get("role") == "user" and isinstance(m.get("content"), str):
             m["content"] = sp + "\n\n" + (m.get("content") or "")
             break
@@ -776,7 +783,7 @@ def fit_context(messages, chat_id="default", on_status=None):
     msgs = _clean(messages)
     if not msgs: return msgs
     if chat_id not in SESSIONS and len(SESSIONS) >= MAX_SESS:
-        SESSIONS.clear()  # cap memoria: scarta le vecchie sessioni
+        SESSIONS.pop(next(iter(SESSIONS)), None)  # cap memoria: scarta solo la sessione più vecchia (non tutte)
     s = SESSIONS.setdefault(chat_id, {"covered": 0, "summary": "", "fp": ""})
     # reset se la storia si è accorciata o la regione già riassunta è cambiata (nuova chat / edit / regen)
     if len(msgs) < s["covered"] or _fp(msgs[:s["covered"]]) != s["fp"]:
@@ -1690,6 +1697,9 @@ class H(http.server.BaseHTTPRequestHandler):
         for k, v in (extra or {}).items(): self.send_header(k, v)
         self.end_headers(); self.wfile.write(b)
     def do_GET(self):
+        host = (self.headers.get("Host") or "").rsplit(":", 1)[0]  # anti DNS-rebinding anche su GET (config/models espongono path)
+        if host not in ("localhost", "127.0.0.1"):
+            self._send(403, "forbidden", "text/plain"); return
         if self.path == "/" or self.path == "/new":  # nuova UI "Terminale × Cifra" (default)
             self._send(200, _load_new_page(), "text/html; charset=utf-8")
         elif self.path == "/old":  # vecchia UI, fallback durante la transizione
@@ -1948,7 +1958,7 @@ class GephidServer(http.server.ThreadingHTTPServer):
     allow_reuse_address = True  # esplicito: al restart (supervisione del launcher) il bind sulla porta non deve fallire
 
 IS_BUNDLED = ".app/Contents/Resources" in os.path.realpath(__file__)  # True solo dentro la .app
-BUILD = "2026-06-25c"  # marker di build: compare in ~/gephid-backend.log per verificare la versione in uso
+BUILD = "2026-06-25d"  # marker di build: compare in ~/gephid-backend.log per verificare la versione in uso
 
 def _launcher_watchdog():
     """Spegne il backend SOLO quando nessun launcher Gephid è più vivo (tutte le finestre chiuse).

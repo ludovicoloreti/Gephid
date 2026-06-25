@@ -543,7 +543,14 @@ func main() {
 		bmu.Lock()
 		c := cmd
 		bmu.Unlock()
-		killBackend(c)
-		fmt.Println("Gephid: ultima finestra chiusa, backend spento.")
+		if c != nil {
+			killBackend(c) // l'ho avviato io: spengo subito il mio gruppo di processi
+			fmt.Println("Gephid: ultima finestra chiusa, backend spento.")
+		} else {
+			// backend riusato (avviato da un'altra istanza): NON lo killo per porta, ucciderei il
+			// backend che una finestra appena aperta potrebbe aver adottato. Lo spegne il
+			// launcher-watchdog del backend quando non resta nessun launcher.
+			fmt.Println("Gephid: ultima finestra chiusa (backend riusato), lo lascio al watchdog.")
+		}
 	}
 }

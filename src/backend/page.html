@@ -615,14 +615,14 @@ async function generate(opts){
     const errMsg=(window.trStatus?trStatus(errObj,LANG):errObj)||errObj;
     card.innerHTML='<div style="color:var(--danger);width:100%;margin-bottom:8px">⚠ '+esc(errMsg.slice(0,180))+'</div><button class="btn-accent rec-s" style="padding:8px 14px;font-size:12px">'+tr('Open Settings')+'</button><button class="stop rec-r" style="margin-left:10px">'+tr('Retry')+'</button>';
     sb.appendChild(card);
-    card.querySelector('.rec-s').onclick=openSettings; card.querySelector('.rec-r').onclick=()=>{ sb.remove(); generate({}); };
+    card.querySelector('.rec-s').onclick=openSettings; card.querySelector('.rec-r').onclick=()=>{ if(busy)return; busy=true; sb.remove(); generate({}); };
     return;
   }
   if(!genStopped && !acc.trim()){  // stream finito senza contenuto: nessuna risposta utile -> niente turno vuoto, mostro un retry
     renderMd(body,''); body.className='msg';
     const card=el('div','meta mono'); card.style.flexWrap='wrap';
     card.innerHTML='<div style="color:var(--dim);width:100%;margin-bottom:8px">'+(LANG==='it'?'Nessuna risposta dal modello. Riprova.':'No response from the model. Try again.')+'</div><button class="stop rec-r">'+tr('Retry')+'</button>';
-    sb.appendChild(card); card.querySelector('.rec-r').onclick=()=>{ sb.remove(); generate({}); };
+    sb.appendChild(card); card.querySelector('.rec-r').onclick=()=>{ if(busy)return; busy=true; sb.remove(); generate({}); };
     scrollDown(); return;
   }
   renderMd(body,acc||''); body.className='msg'; body.dataset.src=acc;  // sorgente markdown grezza per un eventuale Continue
@@ -633,8 +633,8 @@ async function generate(opts){
     const f=el('div','meta mono');
     f.innerHTML='<span style="color:var(--dim)">'+(LANG==='it'?'Interrotto':'Stopped')+' · '+lastStep+'/'+lastTot+' '+(LANG==='it'?'step':'steps')+'</span><button class="stop reg" style="margin-left:14px">'+tr('Regenerate')+'</button><button class="stop cont">'+tr('Continue')+'</button>';
     sb.appendChild(f);
-    f.querySelector('.reg').onclick=()=>{ history.pop(); sb.remove(); generate({}); };  // Regenerate: scarta il parziale, riparte da zero
-    f.querySelector('.cont').onclick=()=>{ f.remove(); generate({turn:sb, body:body, cont:true}); };  // Continue: tiene il parziale, il backend lo prosegue
+    f.querySelector('.reg').onclick=()=>{ if(busy)return; busy=true; history.pop(); sb.remove(); generate({}); };  // Regenerate: scarta il parziale, riparte da zero
+    f.querySelector('.cont').onclick=()=>{ if(busy)return; busy=true; f.remove(); generate({turn:sb, body:body, cont:true}); };  // Continue: tiene il parziale, il backend lo prosegue
     scrollDown(); return;
   }
   const done=el('div','meta mono');
@@ -743,15 +743,20 @@ $('#log').addEventListener('click',e=>{ const act=e.target.closest('.act'); if(!
 });
 
 /* ============ startup health flow ============ */
-let healthFails=0;
-async function pollHealth(){
-  try{ const h=await (await fetch('/api/health')).json();
-    healthFails=0; if(h.model) curModel=h.model; $('#ovBackend').classList.add('hidden');  // risposta ricevuta: backend di nuovo raggiungibile
-    if(h.model_err){ showOverlayErr('load-error',h); return; }
-    if(h.needs_download){ showDownload(); return; }
-    if(h.model_ok){ if(window.__matComplete)__matComplete(); ['#ovStartup','#ovDownload','#ovLoadErr'].forEach(s=>$(s).classList.add('hidden')); setTimeout(pollHealth,4000); return; }  // heartbeat continuo: rileva quando il backend torna su e fa sparire l'overlay
-    setTimeout(pollHealth,600);
-  }catch(e){ healthFails++; if(healthFails>=5){ showOverlayErr('backend-unreachable'); } setTimeout(pollHealth, healthFails>3?2000:600); }
+let healthFails=0, healthGen=0;
+function pollHealth(){
+  const g=++healthGen;  // ogni avvio invalida i loop precedenti: ne resta UNO solo attivo (es. dopo Ricarica)
+  (async function tick(){
+    if(g!==healthGen) return;  // un pollHealth più recente ha preso il controllo
+    try{ const h=await (await fetch('/api/health')).json();
+      if(g!==healthGen) return;
+      healthFails=0; if(h.model) curModel=h.model; $('#ovBackend').classList.add('hidden');  // risposta ricevuta: backend di nuovo raggiungibile
+      if(h.model_err){ showOverlayErr('load-error',h); return; }
+      if(h.needs_download){ showDownload(); return; }
+      if(h.model_ok){ if(window.__matComplete)__matComplete(); ['#ovStartup','#ovDownload','#ovLoadErr'].forEach(s=>$(s).classList.add('hidden')); setTimeout(tick,4000); return; }  // heartbeat continuo: rileva quando il backend torna su e fa sparire l'overlay
+      setTimeout(tick,600);
+    }catch(e){ if(g!==healthGen) return; healthFails++; if(healthFails>=5){ showOverlayErr('backend-unreachable'); } setTimeout(tick, healthFails>3?2000:600); }
+  })();
 }
 let dlActive=false;
 function showDownload(){ if(dlActive)return; dlActive=true; $('#ovStartup').classList.add('hidden'); $('#ovDownload').classList.remove('hidden'); runDownload(); }
