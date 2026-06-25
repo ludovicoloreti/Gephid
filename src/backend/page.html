@@ -486,6 +486,19 @@ function renderWelcome(){
   $('#log').innerHTML=''; const b=addTurn('gep');
   const m=el('div','msg soft'); m.innerHTML=(LANG==='it'?WELCOME_IT:WELCOME_EN); b.appendChild(m);
 }
+// persistenza chat: la conversazione vive anche dopo crash/ricarica/riavvio del backend
+function saveChat(){ try{ localStorage.setItem('gephid-chat', JSON.stringify(history)); }catch(e){} }
+function restoreChat(){
+  let saved; try{ saved=JSON.parse(localStorage.getItem('gephid-chat')||'[]'); }catch(e){ saved=[]; }
+  if(!Array.isArray(saved)||!saved.length) return false;
+  history=saved.slice(); $('#log').innerHTML='';
+  saved.forEach(h=>{ if(!h||!h.content) return;
+    if(h.role==='user'){ const b=addTurn('user'); const m=el('div','msg'); m.textContent=h.content; b.appendChild(m); }
+    else{ const b=addTurn('gep'); const m=el('div','msg'); renderMd(m,h.content); m.dataset.src=h.content; b.appendChild(m);
+      const meta=el('div','meta mono'); meta.innerHTML=META_COPY.replace('__COPY__',tr('Copy')).replace('__DL__',tr('Download')); b.appendChild(meta); }
+  });
+  scrollDown(); return true;
+}
 
 /* markdown via marked/DOMPurify if present, else plain text (fail-safe, offline) */
 function renderMd(node,text){
@@ -549,7 +562,7 @@ async function send(){
   // user turn
   const ub=addTurn('user'); const um=el('div','msg'); um.textContent=txt||tr('(see attachments)'); ub.appendChild(um);
   if(atts.length){ atts.forEach(a=>{ const c=el('div','att mono'); c.innerHTML='<svg width="13" height="13" viewBox="0 0 24 24"><path d="M14 4v5h5" stroke-width="2" stroke-linejoin="round"></path><path d="M14 4H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9z" stroke-width="2" stroke-linejoin="round"></path></svg>'+esc(a.name)+' <span style="color:var(--dim2)">·</span> ✓ '+(a.tokens||0)+' tok'; ub.appendChild(c); }); }
-  history.push({role:'user',content:txt||'(allegato)'});
+  history.push({role:'user',content:txt||'(allegato)'}); saveChat();  // salva subito: il messaggio non si perde anche se la generazione fallisce
   $('#ta').value=''; $('#ta').style.height='auto';
   const attachIds=atts.map(a=>a.id); attachments=[]; renderChips();
   await generate({attach:attachIds});
@@ -629,6 +642,7 @@ async function generate(opts){
   // su Continue aggiorna l'assistant esistente invece di aggiungerne uno nuovo
   if(opts.cont && history.length && history[history.length-1].role==='assistant') history[history.length-1].content=acc;
   else history.push({role:'assistant',content:acc});
+  saveChat();  // persiste la risposta completa
   if(genStopped){  // interrotto -> tieni il parziale + Regenerate/Continue
     const f=el('div','meta mono');
     f.innerHTML='<span style="color:var(--dim)">'+(LANG==='it'?'Interrotto':'Stopped')+' · '+lastStep+'/'+lastTot+' '+(LANG==='it'?'step':'steps')+'</span><button class="stop reg" style="margin-left:14px">'+tr('Regenerate')+'</button><button class="stop cont">'+tr('Continue')+'</button>';
@@ -656,7 +670,7 @@ async function streamNDJSON(url,bodyObj,onObj,signal){
 $('#btnSend').onclick=send;
 $('#ta').addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); send(); } });
 $('#ta').addEventListener('input',function(){ this.style.height='auto'; this.style.height=Math.min(120,this.scrollHeight)+'px'; });
-function newChat(){ history=[]; attachments=[]; genAttach=[]; $('#chiprow').innerHTML=''; chatId=(crypto.randomUUID?crypto.randomUUID():'c'+Date.now()); renderWelcome(); updateSend(); }
+function newChat(){ history=[]; attachments=[]; genAttach=[]; $('#chiprow').innerHTML=''; chatId=(crypto.randomUUID?crypto.randomUUID():'c'+Date.now()); saveChat(); renderWelcome(); updateSend(); }
 $('#btnNew').onclick=()=>{ if(busy)return; if(history.length>0) $('#confirm').classList.remove('hidden'); else newChat(); };
 $('#cfCancel').onclick=()=>$('#confirm').classList.add('hidden');
 $('#confirm').addEventListener('click',e=>{ if(e.target===$('#confirm'))$('#confirm').classList.add('hidden'); });
@@ -904,7 +918,7 @@ async function compactChat(){
   applyTheme(localStorage.getItem('gephid-theme')||'system');
   applyTextSize(localStorage.getItem('gephid-textsize')||'l');
   applyLang(LANG);
-  renderWelcome();
+  if(!restoreChat()) renderWelcome();  // riprende la chat salvata; altrimenti il benvenuto
   updateSend();
   const demo = new URLSearchParams(location.search).has('demo');
   if(demo){ $('#ovStartup').classList.add('hidden'); seedDemo(); }

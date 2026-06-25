@@ -1958,31 +1958,28 @@ class GephidServer(http.server.ThreadingHTTPServer):
     allow_reuse_address = True  # esplicito: al restart (supervisione del launcher) il bind sulla porta non deve fallire
 
 IS_BUNDLED = ".app/Contents/Resources" in os.path.realpath(__file__)  # True solo dentro la .app
-BUILD = "2026-06-25d"  # marker di build: compare in ~/gephid-backend.log per verificare la versione in uso
+BUILD = "2026-06-25e"  # marker di build: compare in ~/gephid-backend.log per verificare la versione in uso
 
 def _launcher_watchdog():
-    """Spegne il backend SOLO quando nessun launcher Gephid è più vivo (tutte le finestre chiuse).
-    Si basa sulla PRESENZA del processo launcher, non sull'heartbeat della pagina: così il backend
-    resta vivo finché c'è almeno una finestra aperta, anche in background quando macOS rallenta i
-    timer JS (era questa la causa del 'Backend non raggiungibile dopo un po'). Per i dev (script
-    fuori dalla .app) il watchdog non parte affatto."""
+    """Spegne il backend quando il launcher che lo ha avviato (il processo PADRE) muore:
+    os.getppid() diventa 1 (reparented a launchd). È immediato e affidabile al 100%, NON usa pgrep
+    in modo continuo (che nel contesto della .app può non enumerare i processi: dava falsi negativi
+    e mandava il backend in un loop di auto-spegnimento/riavvio infinito). Solo DOPO che il padre è
+    morto, un pgrep best-effort lascia comunque vivo il backend se resta aperta un'altra finestra."""
     import subprocess
-    grace = time.time() + 30   # margine all'avvio: lascia comparire il launcher
-    misses = 0
     while True:
         time.sleep(5)
-        try:
+        if os.getppid() != 1:
+            continue  # il launcher è ancora vivo: NON spegnere (zero falsi positivi -> niente loop)
+        try:  # il padre è morto: resto vivo solo se un'altra finestra è ancora aperta (multi-finestra)
             out = subprocess.run(["pgrep", "-f", "Gephid.app/Contents/MacOS/Gephid"],
                                  capture_output=True, text=True, timeout=4).stdout
             if any(x.strip() for x in out.split()):
-                misses = 0
-            elif time.time() > grace:
-                misses += 1
-                if misses >= 2:  # due check a vuoto consecutivi (~10s) per evitare falsi positivi
-                    print("nessun launcher Gephid vivo → spengo il backend", flush=True)
-                    os._exit(0)
+                continue
         except Exception:
-            misses = 0  # nel dubbio non spegnere
+            pass
+        print("launcher terminato → spengo il backend", flush=True)
+        os._exit(0)
 
 if __name__ == "__main__":
     srv = GephidServer(("127.0.0.1", PORT), H)  # solo loopback
