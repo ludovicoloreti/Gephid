@@ -305,6 +305,10 @@
       <div class="sect"><div class="slabel mono" data-i18n="OCR per documenti scansionati">OCR for scanned documents</div>
         <div class="seg" data-seg="ocr" style="margin-bottom:10px"><span class="o" data-v="apple">Fast</span><span class="o" data-v="local" data-i18n="Avanzato">Advanced</span><span class="o" data-v="omlx" data-i18n="Massima fedeltà">Max fidelity</span></div>
         <div class="ocrhint" data-i18n="Fast: motore di sistema Apple. Avanzato: modello locale dedicato. Massima fedeltà: instrada ogni pagina al motore migliore.">Fast: Apple system engine. Advanced: dedicated local model. Max fidelity: routes each page to the best engine.</div></div>
+      <div class="sect"><div class="slabel mono" data-i18n="Istruzioni al modello">Model instructions</div>
+        <div class="rh" data-i18n="Regole che il modello segue in ogni risposta. Vuoto = nessuna.">Rules the model follows in every reply. Empty = none.</div>
+        <textarea id="sysPrompt" rows="4" spellcheck="false" style="width:100%;box-sizing:border-box;font-size:14px;line-height:1.5;color:var(--text);border:1px solid var(--field-border);border-radius:8px;padding:10px 12px;background:var(--field-bg);font-family:-apple-system,sans-serif;outline:none;resize:vertical;margin:9px 0"></textarea>
+        <div class="saverow"><button class="btn-accent" id="saveSys" data-i18n="Salva">Save</button><span class="note" id="resetSys" style="cursor:pointer;text-decoration:underline" data-i18n="Ripristina predefinito">Reset to default</span></div></div>
       <div class="sect"><div class="slabel mono" data-i18n="Modello">Model</div>
         <div class="mrow"><select id="modelsel"></select><svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M6 9l6 6 6-6" stroke="var(--dim)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path></svg></div>
         <div class="advb"><div class="al mono" data-i18n="avanzato · HF id o cartella locale">advanced · HF id or local folder</div><input id="modelin" class="mono" placeholder="mlx-community/…  or  ~/Models/…"></div>
@@ -901,7 +905,11 @@ async function compactChat(){
   if(demo){ $('#ovStartup').classList.add('hidden'); seedDemo(); }
   else { pollHealth(); loadConfig(); }
 })();
-async function loadConfig(){ try{ const c=await(await fetch('/api/config')).json(); curSteps=c.default_steps||32; curMaxTok=c.default_max_tokens||8192; curOcr=c.ocr_engine||'local'; setSeg('ocr',curOcr); }catch(e){} }
+let sysDefault='';
+async function loadConfig(){ try{ const c=await(await fetch('/api/config')).json(); curSteps=c.default_steps||32; curMaxTok=c.default_max_tokens||8192; curOcr=c.ocr_engine||'local'; setSeg('ocr',curOcr);
+  sysDefault=c.system_prompt_default||''; if($('#sysPrompt'))$('#sysPrompt').value=(c.system_prompt!==undefined?c.system_prompt:sysDefault); }catch(e){} }
+$('#saveSys').onclick=()=>{ postConfig({system_prompt:$('#sysPrompt').value}); toast(LANG==='it'?'Istruzioni salvate':'Instructions saved'); };
+$('#resetSys').onclick=()=>{ $('#sysPrompt').value=sysDefault; postConfig({system_prompt:sysDefault}); toast(LANG==='it'?'Ripristinato al predefinito':'Reset to default'); };
 
 /* ============ demo seeding (verification only) ============ */
 function seedDemo(){

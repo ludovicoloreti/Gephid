@@ -16,9 +16,14 @@ DOWNLOADS_DIR = os.path.expanduser("~/Downloads")
 CONFIG_DIR = os.path.expanduser("~/.config/diffuchat")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+# Pre-prompt di default: DiffusionGemma non ha un ruolo "system", quindi queste istruzioni
+# vengono anteposte al primo turno utente per ancorarne il comportamento. Modificabile dalle Impostazioni.
+SYS_DEFAULT = ("Segui con precisione le istruzioni dell'utente e tieni conto di tutta la conversazione. "
+               "Rispondi nella lingua dell'utente, in modo diretto e conciso. Niente emoji.")
 DEFAULTS = {"model": "mlx-community/diffusiongemma-26B-A4B-it-8bit",
             "port": 8890, "default_steps": 32, "default_max_tokens": 32768,
-            "ocr_engine": "local"}  # apple (Apple Vision) | local (GLM-OCR in-process) | omlx | paranoid (router oMLX)
+            "ocr_engine": "local",  # apple (Apple Vision) | local (GLM-OCR in-process) | omlx | paranoid (router oMLX)
+            "system_prompt": SYS_DEFAULT}
 STEP_MIN, STEP_MAX = 16, 64   # sotto 16 il modello a diffusione degenera su testi lunghi
 TOK_MIN, TOK_MAX = 128, 32768   # max token di output per risposta (il modello si ferma all'EOS; il contesto è 256K)
 
@@ -38,6 +43,8 @@ def validate_config(cfg):
         out["default_max_tokens"] = _coerce_int(cfg.get("default_max_tokens"), TOK_MIN, TOK_MAX, DEFAULTS["default_max_tokens"])
         oe = cfg.get("ocr_engine")
         if oe in ("apple", "local", "omlx", "paranoid"): out["ocr_engine"] = oe
+        sp = cfg.get("system_prompt")
+        if isinstance(sp, str): out["system_prompt"] = sp[:2000]  # stringa vuota = pre-prompt disattivato
     return out
 
 def load_config():
@@ -192,6 +199,19 @@ def _html_to_pdf(html, footer=""):
         pg.insert_textbox(rect, footer, fontsize=8, fontname="cour", color=(0.60, 0.64, 0.70), align=fitz.TEXT_ALIGN_CENTER)
     out = doc.tobytes()
     doc.close()
+    return out
+
+def inject_system(messages):
+    """Antepone il pre-prompt (CFG['system_prompt']) al primo turno utente. DiffusionGemma non ha
+    un ruolo 'system', quindi lo iniettiamo nel testo del primo messaggio utente. Stringa vuota = off.
+    Usato solo dalla chat (non da compattazione/reload, che hanno istruzioni proprie)."""
+    sp = (CFG.get("system_prompt") or "").strip()
+    if not sp or not messages: return messages
+    out = [dict(m) for m in messages]
+    for m in out:
+        if m.get("role") == "user" and isinstance(m.get("content"), str):
+            m["content"] = sp + "\n\n" + (m.get("content") or "")
+            break
     return out
 
 def genera(messages, steps, max_tokens):
@@ -874,6 +894,7 @@ def config_payload():
     return {"model": CFG["model"], "loaded_model": MODEL,
             "default_steps": CFG["default_steps"], "default_max_tokens": CFG["default_max_tokens"],
             "ocr_engine": CFG.get("ocr_engine", "apple"),
+            "system_prompt": CFG.get("system_prompt", SYS_DEFAULT), "system_prompt_default": SYS_DEFAULT,
             "paths": {"config": CONFIG_PATH, "python": sys.executable,
                       "script": os.path.abspath(__file__),
                       "hf_cache": os.path.expanduser("~/.cache/huggingface/hub")}}
@@ -1758,6 +1779,7 @@ class H(http.server.BaseHTTPRequestHandler):
                         if doc_ctx and msgs:
                             msgs = msgs[:-1] + [{"role": msgs[-1]["role"],
                                                  "content": "Contesto dai documenti allegati:\n" + doc_ctx + "\n\n---\n\n" + msgs[-1]["content"]}]
+                    msgs = inject_system(msgs)  # pre-prompt: ancora il comportamento del modello (prima del guard, così conta nei token)
                     # Guard memoria GPU: attenzione ~seq^2, quindi prompt+output deve stare in SAFE_SEQ.
                     # Tieni il prompt entro un tetto (riducendo i documenti) e clampa i max token di output.
                     # Nota: usa una variabile nuova (eff_mtok), non riassegnare 'mtok' del closure (UnboundLocalError).
@@ -1883,6 +1905,8 @@ class H(http.server.BaseHTTPRequestHandler):
             if oe in ("apple", "local", "omlx", "paranoid"):
                 CFG["ocr_engine"] = oe
                 globals()["OCR_ENGINE"] = oe   # effetto immediato sui prossimi ingest, senza riavvio
+            if isinstance(req.get("system_prompt"), str):
+                CFG["system_prompt"] = req["system_prompt"][:2000]  # pre-prompt, effetto immediato sui prossimi messaggi
             save_config(CFG)
             self._send(200, json.dumps({"ok": True}))
         elif self.path == "/api/download":
@@ -1922,7 +1946,7 @@ class GephidServer(http.server.ThreadingHTTPServer):
     allow_reuse_address = True  # esplicito: al restart (supervisione del launcher) il bind sulla porta non deve fallire
 
 IS_BUNDLED = ".app/Contents/Resources" in os.path.realpath(__file__)  # True solo dentro la .app
-BUILD = "2026-06-25b"  # marker di build: compare in ~/gephid-backend.log per verificare la versione in uso
+BUILD = "2026-06-25c"  # marker di build: compare in ~/gephid-backend.log per verificare la versione in uso
 
 def _launcher_watchdog():
     """Spegne il backend SOLO quando nessun launcher Gephid è più vivo (tutte le finestre chiuse).
