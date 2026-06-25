@@ -47,7 +47,7 @@ Un piccolo **launcher Go** apre una finestra nativa (WKWebView), avvia il **back
 sottoprocesso, mostra una schermata di caricamento finché il modello non è pronto, poi punta la
 finestra sulla UI locale. Il backend (`127.0.0.1:8890`) carica il modello a diffusione via MLX e
 serve sia l'interfaccia sia le API. Il launcher sorveglia il backend, lo riavvia se si ferma, e lo
-spegne quando si chiude l'ultima finestra. Dettagli tecnici: **[ARCHITECTURE.md](ARCHITECTURE.md)**.
+spegne quando si chiude l'ultima finestra. Dettagli tecnici: **[ARCHITECTURE.it.md](ARCHITECTURE.it.md)**.
 
 ## Uso
 Apri **Gephid** (da `/Applications`, o con doppio click sulla `.app`). La finestra appare subito con
@@ -65,7 +65,7 @@ cd Gephid
 ./build.sh --install      # scarica tutto, assembla Gephid.app e la installa in /Applications
 ```
 `build.sh` è idempotente (riusa un Python embeddato già presente). Guida completa, ciclo di sviluppo
-rapido e nota su Windows/`.exe`: **[BUILD.md](BUILD.md)**.
+rapido e nota su Windows/`.exe`: **[BUILD.it.md](BUILD.it.md)**.
 
 ## Requisiti
 - macOS su Apple Silicon (M1 o successivi).

@@ -1,59 +1,62 @@
 # Build
 
-Gephid è un'app **nativa macOS (Apple Silicon)**. La `.app` non è versionata: si ricrea dai
-sorgenti con `build.sh`.
+**English** · [Italiano](BUILD.it.md)
 
-## macOS — `.app`
+Gephid is a **native macOS (Apple Silicon)** app. The `.app` is not versioned: rebuild it from
+source with `build.sh`.
 
-### Requisiti
-- macOS su Apple Silicon (M1 o successivi), macOS 11+.
-- [Go](https://go.dev) e Xcode Command Line Tools (`xcode-select --install`) per compilare il launcher.
-- Rete solo per il **primo** build (scarica python embeddato e librerie front-end); a runtime l'app è 100% offline.
-- ~30 GB liberi per il modello, scaricato a parte nella cache di HuggingFace.
+## macOS: the `.app`
 
-### Comandi
+### Requirements
+- macOS on Apple Silicon (M1 or newer), macOS 11+.
+- [Go](https://go.dev) and the Xcode Command Line Tools (`xcode-select --install`) to compile the launcher.
+- Network only for the **first** build (it downloads the embedded Python and the front-end libraries); at runtime the app is 100% offline.
+- About 30 GB free for the model, downloaded separately into the HuggingFace cache.
+
+### Commands
 ```bash
 cd Gephid
-./build.sh              # crea ./Gephid.app
-./build.sh --install    # crea ./Gephid.app e la copia in /Applications
+./build.sh              # creates ./Gephid.app
+./build.sh --install    # creates ./Gephid.app and copies it to /Applications
 ```
 
-### Cosa fa `build.sh` (6 passi)
-1. **Front-end**: scarica e vendorizza marked, DOMPurify, html2pdf, KaTeX + font in `src/backend/static/` (così niente CDN a runtime).
-2. **Python embeddato**: scarica l'interprete relocabile di [python-build-standalone](https://github.com/astral-sh/python-build-standalone) in `Gephid.app/Contents/Resources/python` e installa le dipendenze (`mlx-vlm pypdf python-docx openpyxl pymupdf ocrmac`). Idempotente: salta se già presente.
-3. **Launcher Go**: `CGO_ENABLED=1 go build` del guscio Cocoa/WKWebView.
-4. **Bundle**: assembla `Contents/` (binario, `diffuchat.py`, `static/`, icona, `Info.plist`).
-5. **Firma** ad-hoc (`codesign`).
-6. **Install** opzionale in `/Applications` (con `--install`).
+### What `build.sh` does (6 steps)
+1. **Front-end**: downloads and vendors marked, DOMPurify, html2pdf, KaTeX and the fonts into `src/backend/static/` (no CDN at runtime).
+2. **Embedded Python**: downloads the relocatable interpreter from [python-build-standalone](https://github.com/astral-sh/python-build-standalone) into `Gephid.app/Contents/Resources/python` and installs the dependencies (`mlx-vlm pypdf python-docx openpyxl pymupdf ocrmac`). Idempotent: it skips this step if Python is already present.
+3. **Go launcher**: `CGO_ENABLED=1 go build` of the Cocoa/WKWebView shell.
+4. **Bundle**: assembles `Contents/` (binary, `diffuchat.py`, `page.html`, `static/`, icon, `Info.plist`).
+5. **Sign** ad-hoc (`codesign`).
+6. **Install** optionally into `/Applications` (with `--install`).
 
-Per rifare il python embeddato da zero: `rm -rf Gephid.app/Contents/Resources/python`.
+To rebuild the embedded Python from scratch: `rm -rf Gephid.app/Contents/Resources/python`.
 
-### Modello
-Default `mlx-community/diffusiongemma-26B-A4B-it-8bit` (~28 GB). Si scarica al primo avvio nella
-cache di HuggingFace; il path è configurabile dalle Impostazioni dell'app.
+### Model
+Default `mlx-community/diffusiongemma-26B-A4B-it-8bit` (about 28 GB). It downloads on first launch
+into the HuggingFace cache; the path is configurable from the app's Settings.
 
-### Sviluppo rapido (senza ribuildare tutto)
-- Solo `src/backend/diffuchat.py`: copialo in `Gephid.app/Contents/Resources/diffuchat.py`, poi
-  `codesign --force --deep --sign - Gephid.app` e riavvia. Il launcher Go non va ricompilato.
-- `src/launcher/main.go`: `cd src/launcher && CGO_ENABLED=1 go build -o /tmp/Gephid .`, copia il
-  binario in `Gephid.app/Contents/MacOS/Gephid`, ri-firma.
-- Backend senza GUI: `~/.venv-mlxvlm/bin/python src/backend/diffuchat.py`, poi `curl localhost:8890/...`.
+### Quick dev loop (without rebuilding everything)
+- Only `src/backend/diffuchat.py` or `src/backend/page.html`: copy them into
+  `Gephid.app/Contents/Resources/`, then `codesign --force --deep --sign - Gephid.app` and relaunch.
+  The Go launcher does not need recompiling.
+- `src/launcher/main.go`: `cd src/launcher && CGO_ENABLED=1 go build -o /tmp/Gephid .`, copy the
+  binary into `Gephid.app/Contents/MacOS/Gephid`, re-sign.
+- Backend without the GUI: `~/.venv-mlxvlm/bin/python src/backend/diffuchat.py`, then `curl localhost:8890/...`.
 
-## Windows — `.exe`
+## Windows: the `.exe`
 
-**Non esiste ancora, e non è un'opzione di `build.sh`.** Gephid è legata a macOS da due dipendenze
-di fondo:
+**It does not exist yet, and it is not an option of `build.sh`.** Gephid is tied to macOS by two deep
+dependencies:
 
-- **Runtime del modello**: l'inferenza gira via `mlx-vlm`, e [MLX](https://github.com/ml-explore/mlx)
-  è il framework ML di Apple, esclusivo per Apple Silicon. Su Windows non c'è. Servirebbe un runtime
-  diverso (PyTorch+CUDA, llama.cpp, ONNX Runtime) e DiffusionGemma in un formato supportato lì: di
-  fatto il backend di inferenza va riscritto.
-- **Guscio nativo**: `main.go` usa cgo con Cocoa, WKWebView, Speech e AVFoundation — tutte API Apple.
-  Su Windows servirebbe un guscio basato su WebView2 e la riscrittura di menu, pannelli file e dettatura.
+- **Model runtime**: inference runs via `mlx-vlm`, and [MLX](https://github.com/ml-explore/mlx) is
+  Apple's ML framework, exclusive to Apple Silicon. It is not available on Windows. You would need a
+  different runtime (PyTorch+CUDA, llama.cpp, ONNX Runtime) and DiffusionGemma in a format supported
+  there: in practice the inference backend has to be rewritten.
+- **Native shell**: `main.go` uses cgo with Cocoa, WKWebView, Speech and AVFoundation, all Apple
+  APIs. On Windows you would need a WebView2-based shell and a rewrite of the menu, file panels and
+  dictation.
 
-**Riutilizzabile in un eventuale port**: la UI (HTML/CSS/JS inline in `diffuchat.py`) e gran parte
-della logica HTTP del backend sono portabili. Cambiano il runtime del modello e il guscio nativo,
-con packaging via PyInstaller/Nuitka per l'`.exe`.
+**Reusable in a possible port**: the UI (`src/backend/page.html`) and most of the backend's HTTP
+logic are portable. The model runtime and the native shell change, with packaging via
+PyInstaller/Nuitka for the `.exe`.
 
-In breve: un `.exe` Windows sarebbe un **port a parte**, da pianificare separatamente, non un target
-di questa build.
+In short: a Windows `.exe` would be a **separate port**, to plan on its own, not a target of this build.

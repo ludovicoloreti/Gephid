@@ -1,93 +1,95 @@
-# Architettura di Gephid
+# Gephid architecture
 
-App nativa macOS (Apple Silicon) che dà a DiffusionGemma una chat in stile ChatGPT,
-100% offline, racchiusa in un'unica `.app`. Il modello resta esterno e configurabile.
-Nome: **Ge**mma + **diffusion**, scritto come "zaffiro".
+**English** · [Italiano](ARCHITECTURE.it.md)
 
-## Struttura
+A native macOS (Apple Silicon) app that gives DiffusionGemma a ChatGPT-style chat, 100% offline,
+wrapped in a single `.app`. The model stays external and configurable.
+Name: **Ge**mma + **diffusion**, written like "sapphire".
+
+## Layout
 ```
 Gephid/
-├── build.sh                  # build della .app da zero
-├── BUILD.md                  # guida di build (.app; nota su Windows/.exe)
-├── README.md  README.it.md  ARCHITECTURE.md  LICENSE
-├── assets/icon.icns          # icona (serratura royalblue inclinata 13.37°)
+├── build.sh                  # builds the .app from scratch
+├── BUILD.md / BUILD.it.md    # build guide (.app; note on Windows/.exe)
+├── README.md / README.it.md  # this guide in both languages
+├── ARCHITECTURE.md / .it.md  # this document
+├── LICENSE
+├── assets/icon.icns          # icon (royalblue padlock, tilted 13.37 degrees)
 ├── src/
 │   ├── backend/
-│   │   ├── diffuchat.py       # backend: server HTTP + UI (HTML/CSS/JS inline) + modello
-│   │   └── static/           # librerie vendorizzate: marked, DOMPurify, html2pdf, KaTeX + fonts
+│   │   ├── diffuchat.py       # backend: HTTP server + model
+│   │   ├── page.html         # UI (HTML/CSS/JS), served from disk on every request
+│   │   └── static/           # vendored libraries: marked, DOMPurify, html2pdf, KaTeX + fonts
 │   └── launcher/
-│       ├── main.go           # guscio Go + WKWebView + cgo (menu, file/save panel, dettatura)
+│       ├── main.go           # Go shell + WKWebView + cgo (menu, file/save panel, dictation)
 │       └── go.mod go.sum logo.svg
-└── Gephid.app                # artefatto buildato (~1GB, non versionato: si ricrea con build.sh)
+└── Gephid.app                # built artifact (~1GB, not versioned: rebuild with build.sh)
 ```
 
-## Architettura
-1. **Launcher Go** (`src/launcher/main.go`): apre una finestra WKWebView, avvia il backend Python
-   come sottoprocesso, mostra uno splash finché `/api/health` non risponde, naviga a
-   `http://127.0.0.1:8890`, e alla chiusura uccide il backend. cgo/Cocoa fornisce menu nativo,
-   pannelli file/salvataggio nativi e dettatura on-device (Speech + AVFoundation).
-2. **Backend Python** (`src/backend/diffuchat.py`): `ThreadingHTTPServer` su `127.0.0.1:8890`.
-   Carica il modello via `mlx-vlm` e serve UI + API. La UI è tutta inline nella stringa `PAGE`.
-3. **Bundle .app**: Python embeddato (`Contents/Resources/python`, da python-build-standalone) +
-   `diffuchat.py` + `static/` + `icon.icns`. Firmato ad-hoc.
+## Architecture
+1. **Go launcher** (`src/launcher/main.go`): opens a WKWebView window, starts the Python backend as
+   a subprocess, shows a splash until `/api/health` responds, navigates to `http://127.0.0.1:8890`,
+   supervises the backend (restarts it if it dies), and shuts it down when the last window closes.
+   cgo/Cocoa provides the native menu, file/save panels and on-device dictation (Speech +
+   AVFoundation).
+2. **Python backend** (`src/backend/diffuchat.py`): `ThreadingHTTPServer` on `127.0.0.1:8890`. Loads
+   the model via `mlx-vlm` and serves the UI and the API. The UI lives in `page.html`, re-read from
+   disk on every request.
+3. **`.app` bundle**: embedded Python (`Contents/Resources/python`, from python-build-standalone) +
+   `diffuchat.py` + `page.html` + `static/` + `icon.icns`. Ad-hoc signed.
 
-## Vincoli da non reintrodurre
-- **Thread del modello**: MLX vuole le ops del modello sul thread che ha caricato i pesi. Quindi
-  `serve_forever()` gira su un thread daemon e il main thread fa da worker (`_model_worker`, che
-  consuma `JOBS`). Gli handler HTTP non toccano il modello: accodano un `Job` e ne streamano gli
-  eventi (`stream_job`). Su un altro thread si ottiene `no Stream(gpu) in current thread`.
-- **Avvio**: il modello si carica in `__main__` con `load_model()`, dopo l'avvio del server e sul
-  main thread. Così `/api/health` risponde subito (`model_ok=false`) e la finestra appare in ~1s
-  con un overlay di caricamento, invece di restare in attesa dei ~28GB. Non riportare la `load()`
-  a import-time.
-- **Memoria GPU**: il modello a diffusione usa attenzione bidirezionale, quindi la memoria di un
-  singolo buffer cresce ~seq² (≈32 byte/token²). Il limite non è la finestra di contesto (256K) ma
-  il `max_buffer_length` della GPU. `SAFE_SEQ` (derivato da `mx.device_info()` a ogni avvio) tiene
-  `prompt+output` sotto quel limite; `DOC_CTX` ne deriva. Documenti più grandi vengono compressi
-  con map-reduce (`build_doc_context` → `map_reduce_summarize`), non passati grezzi.
-- **Python embeddato, non quello di sistema**: il framework-python di Homebrew lanciato da GUI si
-  blocca all'avvio. Serve l'eseguibile relocabile di python-build-standalone, con env pulito (`cmd.Env`).
-- **100% offline**: `HF_HUB_OFFLINE=1`/`TRANSFORMERS_OFFLINE=1`; librerie JS in `/static`; bind
-  `127.0.0.1`; check header `Origin` (anti-CSRF). Rendering fail-safe: markdown solo se `marked` e
-  `DOMPurify` sono presenti, altrimenti testo grezzo.
-- **WKWebView**: non scarica via blob → salvataggio lato server (`/api/save`). `<input type=file>`
-  non apre il picker → `gephidOpenFiles` (NSOpenPanel via bind); i pannelli nativi rubano il focus,
-  quindi va ripristinato con `inp.focus()` al ritorno. `alert()/confirm()` non funzionano.
-- **cgo + ARC**: il blocco cgo è compilato con `-fobjc-arc` (senza, la dettatura salvava una
-  `NSString` autorelease in una static → use-after-free → crash). Non rimuoverlo.
-- **Diffusione a blocchi**: il modello genera "tele" da 256 token e le raffina a `steps` (denoising).
-  Step bassi degenerano in ripetizioni su testi lunghi → `STEP_MIN=16`, default 32; il guard
-  `_degenerate` ferma le ripetizioni patologiche. Frontend: typewriter (rAF) con markdown reso live
-  (throttle ~80ms; formule KaTeX a fine risposta) e caret lampeggiante.
-- **Runtime**: solo `mlx-vlm` (mlx-lm dà `Model type diffusion_gemma not supported`); venv di test
-  `~/.venv-mlxvlm`. Velocità (M5 Max): 8 step ≈ 44 tok/s, 16 ≈ 104 tok/s. Modello default
+## Constraints not to reintroduce
+- **Model thread**: MLX wants the model ops on the thread that loaded the weights. So
+  `serve_forever()` runs on a daemon thread and the main thread acts as the worker (`_model_worker`,
+  consuming `JOBS`). HTTP handlers never touch the model: they enqueue a `Job` and stream its events
+  (`stream_job`). On another thread you get `no Stream(gpu) in current thread`.
+- **Startup**: the model loads in `__main__` with `load_model()`, after the server starts and on the
+  main thread. This way `/api/health` responds immediately (`model_ok=false`) and the window appears
+  in ~1s with a loading overlay, instead of waiting on the ~28GB. Do not move `load()` back to
+  import time.
+- **GPU memory**: the diffusion model uses bidirectional attention, so a single buffer grows ~seq²
+  (≈32 bytes/token²). The limit is not the context window (256K) but the GPU's `max_buffer_length`.
+  `SAFE_SEQ` (derived from `mx.device_info()` at each startup) keeps `prompt+output` under that
+  limit; `DOC_CTX` derives from it. Larger documents are compressed with map-reduce
+  (`build_doc_context` → `map_reduce_summarize`), not passed raw.
+- **Embedded Python, not the system one**: Homebrew's framework Python launched from the GUI hangs at
+  startup. You need the relocatable python-build-standalone executable, with a clean env (`cmd.Env`).
+- **100% offline**: `HF_HUB_OFFLINE=1`/`TRANSFORMERS_OFFLINE=1`; JS libraries in `/static`; bind to
+  `127.0.0.1`; `Origin` + `Host` header checks (anti-CSRF / anti DNS-rebinding). Fail-safe rendering:
+  markdown only if `marked` and `DOMPurify` are present, otherwise raw text.
+- **WKWebView**: it cannot download via blob → server-side save (`/api/save`, into `~/Downloads`
+  only). `<input type=file>` does not open the picker → `gephidOpenFiles` (NSOpenPanel via bind);
+  native panels steal focus, so restore it with `inp.focus()` on return. `alert()/confirm()` do not
+  work.
+- **cgo + ARC**: the cgo block is compiled with `-fobjc-arc` (without it, dictation stored an
+  autorelease `NSString` in a static → use-after-free → crash). Do not remove it.
+- **Block diffusion**: the model generates 256-token "canvases" and refines them over `steps`
+  (denoising). Low step counts degenerate into repetition on long text → `STEP_MIN=16`, default 32;
+  the `_degenerate` guard stops pathological repetition. Frontend: typewriter (rAF) with markdown
+  rendered live and the diffusion visible as the block forms.
+- **Runtime**: `mlx-vlm` only (`mlx-lm` gives `Model type diffusion_gemma not supported`); test venv
+  `~/.venv-mlxvlm`. Speed (M5 Max): 8 steps ≈ 44 tok/s, 16 ≈ 104 tok/s. Default model
   `mlx-community/diffusiongemma-26B-A4B-it-8bit` (~28GB).
 
-## API (su 127.0.0.1:8890)
+## API (on 127.0.0.1:8890)
 `GET /` UI · `GET /api/health` · `GET /api/models` · `GET /api/config` · `GET /static/...` ·
-`POST /api/chat` (NDJSON streaming, `attach`=id immagini/doc) · `POST /api/compact` (streaming) ·
-`POST /api/ingest` (file→immagine/doc, OCR per PDF scansionati) · `POST /api/save` ·
-`POST /api/config` (step/maxtok, effetto immediato) · `POST /api/reload` (ricarica modello a caldo).
+`POST /api/chat` (NDJSON streaming, `attach`=image/doc ids) · `POST /api/compact` (streaming) ·
+`POST /api/ingest` (file→image/doc, OCR for scanned PDFs) · `POST /api/save` ·
+`POST /api/config` (steps/maxtok, immediate effect) · `POST /api/reload` (hot model reload).
 
-## Funzioni
-Streaming + stop · memoria per-sessione (finestra + riassunto cumulativo) · compattazione in 1
-prompt · export MD/TXT/HTML/PDF · markdown + LaTeX/chimica (KaTeX) · temi · allegati: immagini
-(vision), documenti txt/md/codice/PDF/Word/Excel/CSV (estrazione + map-reduce per i grandi), PDF
-scansionati via OCR Apple Vision con fallback vision · dettatura on-device opt-in.
+## Features
+Streaming + stop · per-session memory (window + cumulative summary) · compact to one prompt · export
+MD/TXT/HTML/PDF · markdown + LaTeX/chemistry (KaTeX) · themes · attachments: images (vision),
+documents txt/md/code/PDF/Word/Excel/CSV (extraction + map-reduce for large ones), scanned PDFs via
+Apple Vision OCR with a vision fallback · opt-in on-device dictation.
 
 ## Build
-`./build.sh` assembla `Gephid.app`; `./build.sh --install` la installa anche in /Applications.
-Scarica python-build-standalone, fa `pip install` (mlx-vlm, pypdf, python-docx, openpyxl, pymupdf,
-ocrmac) e le librerie JS, compila il Go, assembla e firma ad-hoc. Idempotente (riusa il python
-esistente; per rifarlo da zero: `rm -rf Gephid.app/Contents/Resources/python`).
+`./build.sh` assembles `Gephid.app`; `./build.sh --install` also installs it to /Applications. It
+downloads python-build-standalone, runs `pip install` (mlx-vlm, pypdf, python-docx, openpyxl,
+pymupdf, ocrmac) and the JS libraries, compiles the Go, assembles and signs ad-hoc. Idempotent (it
+reuses an existing Python; to redo from scratch: `rm -rf Gephid.app/Contents/Resources/python`).
+Details in [BUILD.md](BUILD.md).
 
-## Sviluppo rapido
-- Solo `diffuchat.py`: ricopialo in `Gephid.app/Contents/Resources/diffuchat.py` (+ `/Applications`),
-  `codesign --force --deep --sign - Gephid.app`, riavvia. Il Go non serve ribuildarlo.
-- `main.go`: `cd src/launcher && CGO_ENABLED=1 go build -o /tmp/Gephid .`, copia il binario in
-  `Contents/MacOS/Gephid`, ri-firma.
-- Test backend senza GUI: `~/.venv-mlxvlm/bin/python src/backend/diffuchat.py`, poi `curl localhost:8890/...`.
-
-## Requisiti
-macOS Apple Silicon, ~30GB liberi per il modello (in `~/.cache/huggingface/hub`), Go + Xcode CLT
-per ribuildare. Modello default: `mlx-community/diffusiongemma-26B-A4B-it-8bit`.
+## Requirements
+macOS Apple Silicon, ~30GB free for the model (in `~/.cache/huggingface/hub`), Go + Xcode CLT to
+rebuild. Default model: `mlx-community/diffusiongemma-26B-A4B-it-8bit`.
