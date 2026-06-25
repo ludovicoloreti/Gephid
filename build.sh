@@ -48,6 +48,7 @@ echo "==> 4/6  Assemblo il bundle .app"
 mkdir -p "$MACOS" "$RESOURCES"
 cp /tmp/Gephid "$MACOS/Gephid"; chmod +x "$MACOS/Gephid"
 cp "$HERE/src/backend/diffuchat.py" "$RESOURCES/diffuchat.py"
+cp "$HERE/src/backend/page.html" "$RESOURCES/page.html"  # nuova UI redesign (servita su /new)
 rm -rf "$RESOURCES/static"; cp -R "$STATIC" "$RESOURCES/static"
 [ -f "$HERE/assets/icon.icns" ] && cp "$HERE/assets/icon.icns" "$RESOURCES/icon.icns" || true
 cat > "$APP/Contents/Info.plist" <<'PLIST'
@@ -57,7 +58,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleName</key><string>Gephid</string>
   <key>CFBundleDisplayName</key><string>Gephid</string>
   <key>CFBundleExecutable</key><string>Gephid</string>
-  <key>CFBundleIdentifier</key><string>ai.local.gephid</string>
+  <key>CFBundleIdentifier</key><string>pro.lloreti.gephid</string>
   <key>CFBundleIconFile</key><string>icon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleVersion</key><string>1.5</string>

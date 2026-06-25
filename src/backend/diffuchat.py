@@ -4,7 +4,7 @@ diffuchat — chat web per Gephid (text diffusion, MLX).
 Avvio (nel venv mlx-vlm):  ~/.venv-mlxvlm/bin/python ~/Desktop/AI/diffuchat.py
 UI: temi chiaro/scuro/sistema, impostazioni (modello + percorsi), markdown.
 """
-import http.server, json, threading, time, sys, os, hashlib, base64, subprocess, tempfile, uuid, io
+import http.server, json, threading, time, sys, os, hashlib, base64, subprocess, tempfile, uuid, io, re
 
 # 100% offline: niente chiamate di rete a HuggingFace (il modello è già in cache).
 # Senza questo, lanciata via .app (senza token HF nell'ambiente) si blocca su un controllo di rete.
@@ -17,7 +17,8 @@ CONFIG_DIR = os.path.expanduser("~/.config/diffuchat")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DEFAULTS = {"model": "mlx-community/diffusiongemma-26B-A4B-it-8bit",
-            "port": 8890, "default_steps": 32, "default_max_tokens": 32768}
+            "port": 8890, "default_steps": 32, "default_max_tokens": 32768,
+            "ocr_engine": "local"}  # apple (Apple Vision) | local (GLM-OCR in-process) | omlx | paranoid (router oMLX)
 STEP_MIN, STEP_MAX = 16, 64   # sotto 16 il modello a diffusione degenera su testi lunghi
 TOK_MIN, TOK_MAX = 128, 32768   # max token di output per risposta (il modello si ferma all'EOS; il contesto è 256K)
 
@@ -35,6 +36,8 @@ def validate_config(cfg):
         out["port"] = _coerce_int(cfg.get("port"), 1, 65535, DEFAULTS["port"])
         out["default_steps"] = _coerce_int(cfg.get("default_steps"), STEP_MIN, STEP_MAX, DEFAULTS["default_steps"])
         out["default_max_tokens"] = _coerce_int(cfg.get("default_max_tokens"), TOK_MIN, TOK_MAX, DEFAULTS["default_max_tokens"])
+        oe = cfg.get("ocr_engine")
+        if oe in ("apple", "local", "omlx", "paranoid"): out["ocr_engine"] = oe
     return out
 
 def load_config():
@@ -69,6 +72,7 @@ except Exception as e:
     sys.exit(1)
 
 MODELO = PROC = TOK = None
+OCR_MODELO = OCR_PROC = None   # GLM-OCR caricato in-process (lazy) per l'OCR self-contained
 MODEL_OK = False
 MODEL_ERR = ""
 GEN_LOCK = threading.Lock()
@@ -100,34 +104,95 @@ class Job:
         self.q = queue.Queue()          # eventi: ("delta",s)/("status",s)/("done",tps,dt)/("error",m)/("end",)
         self.cancel = threading.Event()  # settato dal thread HTTP se il client sparisce
 JOBS = queue.Queue()
+_WORKER_ALIVE = threading.Event(); _WORKER_ALIVE.set()  # il worker (main thread) sta consumando i job
+JOB_EVENT_TIMEOUT = 300  # s senza alcun evento dal worker -> lo consideriamo bloccato: fallisci, non appendere all'infinito
 def _model_worker():
     try:  # MLX usa stream thread-local: aggancia questo thread allo stream GPU del device
         import mlx.core as mx
         mx.set_default_stream(mx.default_stream(mx.gpu))
     except Exception as e:
         print("set_default_stream:", e, flush=True)
-    while True:
-        job = JOBS.get()
-        try:
-            job.fn(job)
-        except Exception as e:
-            job.q.put(("error", str(e)[:300]))
-        finally:
-            job.q.put(("end",))
+    try:
+        while True:
+            job = JOBS.get()
+            try:
+                job.fn(job)
+            except Exception as e:
+                job.q.put(("error", str(e)[:300]))
+            finally:
+                job.q.put(("end",))
+    finally:
+        _WORKER_ALIVE.clear()  # worker uscito (es. fault non gestibile): i job futuri falliscono subito invece di appendersi
 def start_worker():
     threading.Thread(target=_model_worker, daemon=True, name="gephid-model").start()
 def stream_job(job, emit):
     """Esegue un Job sul worker e riversa i suoi eventi sul socket via emit() (thread HTTP)."""
+    if not _WORKER_ALIVE.is_set():  # worker non attivo: fallisci subito invece di appendere il client per sempre
+        emit({"error": "Il motore locale non è attivo. Riavvia Gephid."}); return
     JOBS.put(job)
     while True:
-        ev = job.q.get()
+        try:
+            ev = job.q.get(timeout=JOB_EVENT_TIMEOUT)
+        except queue.Empty:  # nessun evento per troppo tempo -> worker bloccato
+            emit({"error": "Il motore locale non risponde. Riavvia Gephid."}); job.cancel.set(); break
         if ev[0] == "end": break
         ok = True
         if ev[0] == "delta": ok = emit({"delta": ev[1]})
         elif ev[0] == "status": ok = emit({"status": ev[1]})
+        elif ev[0] == "diff": ok = emit({"diff": ev[1]})  # telemetria diffusione reale
         elif ev[0] == "done": ok = emit({"done": True, "tps": ev[1], "secs": ev[2]})
         elif ev[0] == "error": ok = emit({"error": ev[1]})
         if ok is False: job.cancel.set()  # client disconnesso -> ferma il worker
+
+# Niente emoji/emoticon nell'output del modello: rimozione deterministica
+# (range emoji; le frecce U+2190-21FF come "→" restano, sono testo legittimo).
+# NB: il blocco U+2600-27BF (Misc Symbols + Dingbats) NON è solo emoji: contiene glifi di testo
+# che il modello usa legittimamente (✓ ✗ ★ ☆ ⚠ ❯ ✦ ➤ ✱ ...). Quelli vanno protetti, altrimenti
+# una checklist ("✓ fatto", "✗ errore") o un avviso ("⚠ nota") perderebbe i caratteri.
+_EMOJI = re.compile("[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U00002B00-\U00002BFF\U0000FE00-\U0000FE0F\U0000200D\U000020E3]+")
+# whitelist: simboli TESTUALI/funzionali che il modello usa in markdown/prosa (NON emoji decorative).
+# Le emoji vere (anche ❤ ✨ ⚙ ☀ ⚡ ➡ ➕) NON sono qui -> vengono rimosse. Le frecce → (U+2192) sono
+# fuori dal range di _EMOJI, quindi già salve.
+_KEEP_SYMBOLS = set("✓✔✕✖✗✘"   # spunte e croci (checklist, esiti)
+                    "★☆"        # stelle (rating)
+                    "⚠"         # avviso
+                    "❯❮❭❬➤"    # chevron / puntatori (usati come bullet)
+                    "☐☑☒"       # checkbox / ballot (liste task)
+                    "♀♂"        # segni biologici
+                    "♪♫♩♬"      # note musicali
+                    "♠♣♥♦")     # semi delle carte
+def _strip_emoji(s):
+    if not s:
+        return s
+    return _EMOJI.sub(lambda m: "".join(ch for ch in m.group(0) if ch in _KEEP_SYMBOLS), s)
+
+def _html_to_pdf(html, footer=""):
+    """Rende un documento HTML in un PDF con testo selezionabile (pymupdf/fitz Story).
+    Usato dall'export chat in PDF: niente html2canvas lato browser (produceva PDF vuoti).
+    `footer`: stringa stampata in fondo a OGNI pagina."""
+    import fitz
+    buf = io.BytesIO()
+    story = fitz.Story(html=html)
+    writer = fitz.DocumentWriter(buf)
+    MEDIA = fitz.paper_rect("a4")
+    AREA = MEDIA + (40, 40, -40, -52)  # margine inferiore extra: spazio per il footer
+    more = 1
+    while more:
+        dev = writer.begin_page(MEDIA)
+        more, _ = story.place(AREA)
+        story.draw(dev)
+        writer.end_page()
+    writer.close()
+    if not footer:
+        return buf.getvalue()
+    # footer in fondo a OGNI pagina: riapro il PDF e lo stampo con insert_textbox (più affidabile dello Story)
+    doc = fitz.open("pdf", buf.getvalue())
+    rect = fitz.Rect(40, MEDIA.height - 34, MEDIA.width - 40, MEDIA.height - 14)
+    for pg in doc:
+        pg.insert_textbox(rect, footer, fontsize=8, fontname="cour", color=(0.60, 0.64, 0.70), align=fitz.TEXT_ALIGN_CENTER)
+    out = doc.tobytes()
+    doc.close()
+    return out
 
 def genera(messages, steps, max_tokens):
     formatted = TOK.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
@@ -135,31 +200,66 @@ def genera(messages, steps, max_tokens):
         t0 = time.time()
         parts = []
         for c in stream_generate(MODELO, PROC, prompt=formatted,
-                                 max_tokens=int(max_tokens), max_denoising_steps=int(steps)):
-            parts.append(getattr(c, "text", "") or "")
+                                 max_tokens=int(max_tokens), max_denoising_steps=int(steps),
+                                 skip_special_tokens=True):
+            parts.append(_strip_emoji(getattr(c, "text", "") or ""))
         dt = time.time() - t0
     text = "".join(parts).strip()
     try: ntok = len(TOK.encode(text))
     except Exception: ntok = len(text.split())
     return text, round(ntok / dt, 1) if dt > 0 else 0, round(dt, 1)
 
-def genera_stream(messages, steps, max_tokens, on_delta, images=None):
+def genera_stream(messages, steps, max_tokens, on_delta, images=None, on_event=None, reveal=False, cont=False):
     """Come genera(), ma invoca on_delta(testo) per ogni blocco generato (streaming).
     Se on_delta restituisce False (client disconnesso) la generazione si ferma.
-    images: lista di path immagine -> il modello le "vede" (vision-language)."""
+    images: lista di path immagine -> il modello le "vede" (vision-language).
+    on_event(dict): telemetria di diffusione REALE per ogni chunk (step di denoising,
+    blocco, draft "testo che si risolve dal rumore", tok/s) — alimenta lo stream a diffusione
+    della UI con dati veri del modello invece di un timer."""
     if images:
         from mlx_vlm.prompt_utils import apply_chat_template as _vlm_tmpl
         formatted = _vlm_tmpl(PROC, getattr(MODELO, "config", None), messages, num_images=len(images))
+    elif cont and messages and messages[-1].get("role") == "assistant":
+        # CONTINUAZIONE: il prompt finisce col parziale assistant (turno non chiuso) -> il modello prosegue da lì
+        partial = messages[-1].get("content", "") or ""
+        formatted = TOK.apply_chat_template(messages[:-1], add_generation_prompt=True, tokenize=False) + partial
     else:
         formatted = TOK.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-    kw = {"max_tokens": int(max_tokens), "max_denoising_steps": int(steps)}
+    kw = {"max_tokens": int(max_tokens), "max_denoising_steps": int(steps), "skip_special_tokens": True}
     if images: kw["image"] = images
+    # "Formazione dal rumore": se reveal=True abilita gli unmasking-draft -> il modello emette
+    # lo stato intermedio di ogni blocco (token rivelati + [Mask]) ad ogni 'interval' step, così
+    # la UI mostra lo skeleton che si forma. Costa un po' di velocità -> è un toggle nelle Impostazioni.
+    if reveal and on_event is not None:
+        try:
+            from mlx_vlm.generate.diffusion import is_diffusion_model
+            if is_diffusion_model(MODELO):
+                kw["diffusion_show_unmasking"] = True
+                kw["diffusion_unmasking_interval"] = 2  # un draft ogni 2 step (fluido ma non troppo pesante)
+        except Exception:
+            pass
     with GEN_LOCK:
         t0 = time.time()
         parts = []
+        _last_diff = None  # dedup: evita il flood di eventi 'diff' identici (stesso step/blocco)
         try:
             for c in stream_generate(MODELO, PROC, prompt=formatted, **kw):
-                delta = getattr(c, "text", "") or ""
+                if on_event is not None:
+                    step = int(getattr(c, "diffusion_step", 0) or 0)
+                    blk = int(getattr(c, "diffusion_canvas_index", 0) or 0)
+                    bdone = bool(getattr(c, "diffusion_block_complete", False))
+                    is_draft = bool(getattr(c, "is_draft", False))
+                    # il modello a diffusione spesso NON popola diffusion_total_steps sui chunk: uso 'steps' come totale
+                    tot = int(getattr(c, "diffusion_total_steps", 0) or 0) or int(steps)
+                    key = (step, blk, bdone)
+                    if key != _last_diff:  # un evento per avanzamento reale (nuovo blocco / step / fine blocco)
+                        _last_diff = key
+                        on_event({
+                            "step": step, "total_steps": tot, "block": blk, "block_done": bdone,
+                            "draft": (_strip_emoji(getattr(c, "draft_text", "") or "")) if is_draft else None,
+                            "tps": round(float(getattr(c, "generation_tps", 0.0) or 0.0), 1),
+                        })
+                delta = _strip_emoji(getattr(c, "text", "") or "")
                 if delta:
                     parts.append(delta)
                     if on_delta(delta) is False:  # client sparito -> stop, non sprecare GPU
@@ -177,10 +277,18 @@ def genera_stream(messages, steps, max_tokens, on_delta, images=None):
     except Exception: ntok = len(text.split())
     return text, round(ntok / dt, 1) if dt > 0 else 0, round(dt, 1)
 
+_DEGEN_RUN = re.compile(r"([.,])\1{24,}")  # 25+ punti o virgole di fila (spam patologico)
 def _degenerate(tail):
-    """Rileva la degenerazione tipica del modello a step bassi (ripetizione patologica)."""
-    w = tail.split()
-    return len(w) >= 40 and (len(set(w)) / len(w)) < 0.28
+    """Rileva SOLO degenerazione patologica chiara: PAROLE vere ripetute all'infinito, o lunghe
+    sequenze di punti/virgole. NB: NON guarda spazi/underscore/simboli né la diversità di caratteri,
+    altrimenti ucciderebbe ASCII art, diagrammi, tabelle e codice allineato (legittimamente pieni di
+    run di spazi/_/| e a bassa diversità)."""
+    w = [x for x in tail.split() if any(c.isalnum() for c in x)]  # conta solo "parole" reali
+    if len(w) >= 50 and (len(set(w)) / len(w)) < 0.20:
+        return True
+    if _DEGEN_RUN.search(tail):
+        return True
+    return False
 
 def count_tokens(text):
     try: return len(TOK.encode(text))
@@ -296,7 +404,144 @@ def _render_pdf_to_images(fid, data):
     doc.close()
     return paths
 
-def _ocr_images(paths):
+# OCR: due motori selezionabili. Default "apple" = autosufficiente (Apple Vision, dentro la .app).
+# "omlx" = router multi-modello potente (GLM-OCR + dots.mocr) servito da oMLX su :8000, con
+# fallback automatico ad Apple Vision se il server non risponde. Si attiva con GEPHID_OCR=omlx.
+# selezione motore: env GEPHID_OCR ha priorità (utile per test da shell), poi config.json
+# (così è configurabile anche nella .app lanciata da GUI, dove l'env è pulito), default "apple".
+OCR_ENGINE   = os.environ.get("GEPHID_OCR", CFG.get("ocr_engine", "local")).lower()
+OCR_LOCAL_MODEL = os.environ.get("OCR_LOCAL_MODEL", "mlx-community/GLM-OCR-8bit")  # OCR in-process
+OMLX_OCR_URL = os.environ.get("OMLX_URL", "http://127.0.0.1:8000/v1/chat/completions")
+OMLX_OCR_PROMPT = ("You are a precise OCR engine. Transcribe ALL text from this page into clean "
+    "GitHub-Flavored Markdown, preserving headings, lists, tables (Markdown or HTML) and math "
+    "(LaTeX). Keep the original language (Italian/English). Output ONLY the Markdown, nothing else.")
+
+def _omlx_ocr_page(model, png_path, timeout=300):
+    import urllib.request
+    with open(png_path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode()
+    payload = {"model": model, "temperature": 0.0, "max_tokens": 8000, "messages": [
+        {"role": "user", "content": [
+            {"type": "text", "text": OMLX_OCR_PROMPT},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64," + b64}}]}]}
+    req = urllib.request.Request(OMLX_OCR_URL, data=json.dumps(payload).encode(),
+                                 headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        out = json.loads(r.read().decode())["choices"][0]["message"]["content"].strip()
+    if out.startswith("```"):                       # togli eventuali fence
+        out = out.split("\n", 1)[-1]
+        if out.rstrip().endswith("```"): out = out.rstrip()[:-3]
+    return out.strip()
+
+def _ocr_idnums(text):
+    """Estrae token critici: identificativi (P.IVA/CF: 11/16 cifre) e importi (formato europeo)."""
+    import re
+    clean = "\n".join(ln for ln in text.splitlines()
+                      if not re.search(r"(?i)\b(tel|fax|cell|e-?mail|web|http|www|@)", ln))
+    ids = set()
+    for raw in re.findall(r"\d(?:[ .\-]?\d){10,}", clean):
+        d = re.sub(r"\D", "", raw)
+        if len(d) in (11, 16): ids.add(d)
+    amounts = set(re.findall(r"\b\d{1,3}(?:\.\d{3})+(?:,\d{2})?\b|\b\d+,\d{2}\b", clean))
+    return ids, amounts
+
+def _ocr_vote_note(reads):
+    """reads: {modello: markdown}. Nota di verifica per i token NON unanimi (o '' se tutti d'accordo)."""
+    n = len(reads)
+    idv, amv = {}, {}
+    for m, md in reads.items():
+        ids, ams = _ocr_idnums(md)
+        for t in ids: idv.setdefault(t, set()).add(m)
+        for t in ams: amv.setdefault(t, set()).add(m)
+    lines = []
+    for label, v in (("identificativi", idv), ("importi", amv)):
+        if v and any(len(s) < n for s in v.values()):
+            items = sorted(v.items(), key=lambda kv: -len(kv[1]))
+            lines.append(label + ": " + ", ".join(f"`{t}`={len(s)}/{n}" for t, s in items))
+    if not lines: return ""
+    return f"\n\n> ⚠ **Cifre da verificare (voto a {n} modelli):**\n> " + "\n> ".join(lines)
+
+def _ocr_images_omlx(paths, paranoid=False):
+    """Router OCR su oMLX: GLM-OCR di default; pagine strutturate (tabelle/listini) -> dots.mocr.
+    Se paranoid, sulle pagine con cifre critiche fa votare 3 modelli e appende la nota di verifica."""
+    import re
+    out = []
+    for p in paths:
+        glm = _omlx_ocr_page("GLM-OCR-8bit", p)
+        rows = len(re.findall(r"<tr[ >]", glm, re.I)) + sum(1 for ln in glm.splitlines() if ln.count("|") >= 2)
+        nums = sum(1 for ln in glm.splitlines() if re.match(r"^\s*€?\s*\d[\d.,]*\s*%?\s*$", ln.strip()))
+        md, reads = glm, {"GLM-OCR-8bit": glm}
+        if rows >= 5 or nums >= 4:                  # tabelle/moduli-prezzo -> specialista layout
+            try:
+                dm = _omlx_ocr_page("dots.mocr-8bit", p); md = dm; reads["dots.mocr-8bit"] = dm
+            except Exception: pass
+        if paranoid:
+            ids, ams = _ocr_idnums(glm)
+            if ids or len(ams) >= 2:                # pagina con cifre critiche -> voto a 3
+                if "dots.mocr-8bit" not in reads:
+                    try: reads["dots.mocr-8bit"] = _omlx_ocr_page("dots.mocr-8bit", p)
+                    except Exception: pass
+                try: reads["olmOCR-2-8bit"] = _omlx_ocr_page("olmOCR-2-8bit", p)
+                except Exception: pass
+                md = md + _ocr_vote_note(reads)
+        out.append(md)
+    return "\n\n".join(out).strip()
+
+def run_on_worker(fn):
+    """Esegue fn() sul thread-worker del modello (lo stesso della chat) e ne ritorna il risultato.
+    Serializza OCR e generazione: mai concorrenti sulla GPU → niente contesa, niente impallamento.
+    Bloccante; chiamato dal thread HTTP dell'ingest."""
+    box = {}
+    def job_fn(job):
+        box["val"] = fn()
+    job = Job(job_fn)
+    if not _WORKER_ALIVE.is_set(): raise RuntimeError("motore locale non attivo")
+    JOBS.put(job)
+    while True:
+        try:
+            ev = job.q.get(timeout=JOB_EVENT_TIMEOUT)
+        except queue.Empty:
+            raise RuntimeError("il motore locale non risponde")
+        if ev[0] == "error": box["err"] = ev[1]
+        if ev[0] == "end": break
+    if "err" in box: raise RuntimeError(box["err"])
+    return box.get("val", "")
+
+def _ensure_ocr_model():
+    """Carica GLM-OCR in-process al primo uso. DEVE girare sul worker (MLX: ops sul thread che carica)."""
+    global OCR_MODELO, OCR_PROC
+    if OCR_MODELO is None:
+        print(f"OCR locale: carico {OCR_LOCAL_MODEL} (~1GB)…", flush=True)
+        OCR_MODELO, OCR_PROC = load(OCR_LOCAL_MODEL)
+        print("OCR locale pronto.", flush=True)
+
+def _ocr_page_inproc(path):
+    """OCR di una pagina con GLM-OCR in-process. Da chiamare sul worker, dentro GEN_LOCK."""
+    from mlx_vlm.prompt_utils import apply_chat_template as _vlm_tmpl
+    messages = [{"role": "user", "content": OMLX_OCR_PROMPT}]
+    formatted = _vlm_tmpl(OCR_PROC, getattr(OCR_MODELO, "config", None), messages, num_images=1)
+    parts = []
+    for c in stream_generate(OCR_MODELO, OCR_PROC, prompt=formatted, image=[path], max_tokens=6000):
+        parts.append(getattr(c, "text", "") or "")
+    out = "".join(parts).strip()
+    if out.startswith("```"):
+        out = out.split("\n", 1)[-1]
+        if out.rstrip().endswith("```"): out = out.rstrip()[:-3]
+    return out.strip()
+
+def _ocr_images_local(paths):
+    """OCR self-contained: GLM-OCR nel processo di Gephid, eseguito sul worker del modello.
+    Niente server esterni, niente seconda GPU-engine: OCR e chat si alternano sullo stesso thread."""
+    def work():
+        _ensure_ocr_model()
+        out = []
+        with GEN_LOCK:
+            for p in paths:
+                out.append(_ocr_page_inproc(p))
+        return "\n\n".join(out).strip()
+    return run_on_worker(work)
+
+def _ocr_images_apple(paths):
     """OCR nativo macOS (Apple Vision, offline). Ritorna il testo riconosciuto."""
     try:
         from ocrmac import ocrmac
@@ -310,6 +555,29 @@ def _ocr_images(paths):
         except Exception:
             pass
     return "\n\n".join(out).strip()
+
+def _ocr_images(paths):
+    """Dispatcher OCR: 'local' = GLM-OCR in-process (self-contained); 'omlx'/'paranoid' = router
+    oMLX esterno; default Apple Vision. Tutti con fallback ad Apple Vision in caso di problemi."""
+    if OCR_ENGINE == "local":
+        try:
+            txt = _ocr_images_local(paths)
+            if txt.strip():
+                print("OCR locale in-process (GLM-OCR)", flush=True)
+                return txt
+            print("OCR locale vuoto → fallback Apple Vision", flush=True)
+        except Exception as e:
+            print("OCR locale fallito → fallback Apple Vision:", e, flush=True)
+    elif OCR_ENGINE in ("omlx", "paranoid"):
+        try:
+            txt = _ocr_images_omlx(paths, paranoid=(OCR_ENGINE == "paranoid"))
+            if txt.strip():
+                print(f"OCR via router oMLX ({OCR_ENGINE})", flush=True)
+                return txt
+            print("OCR oMLX vuoto → fallback Apple Vision", flush=True)
+        except Exception as e:
+            print("OCR oMLX non raggiungibile → fallback Apple Vision:", e, flush=True)
+    return _ocr_images_apple(paths)
 
 def ingest_file(name, data):
     fid = uuid.uuid4().hex[:12]
@@ -482,7 +750,7 @@ def _summarize(prev, msgs):
     text, _, _ = genera([{"role": "user", "content": base}], 20, 400)
     return text.strip()
 
-def fit_context(messages, chat_id="default"):
+def fit_context(messages, chat_id="default", on_status=None):
     msgs = _clean(messages)
     if not msgs: return msgs
     if chat_id not in SESSIONS and len(SESSIONS) >= MAX_SESS:
@@ -497,6 +765,7 @@ def fit_context(messages, chat_id="default"):
     aged = msgs[s["covered"]:end]
     if len(aged) >= FOLD_AT:
         fold_end = s["covered"] + (len(aged) - len(aged) % 2)  # solo coppie (utente,assistente) complete
+        if on_status: on_status("comprimo la memoria della conversazione…")  # indicatore per la UI
         try:
             s["summary"] = _summarize(s["summary"], msgs[s["covered"]:fold_end])
             s["covered"] = fold_end
@@ -538,9 +807,73 @@ def list_local_models():
                     out.append({"id": p, "label": pub + "/" + repo + "  (LM Studio)"})
     return out
 
+# ---------- Downloader del modello (primo avvio) ----------
+# È l'UNICO momento in cui Gephid usa la rete: scarica il modello una volta, poi 100% offline.
+_DL = {"got": 0, "total": 0, "active": False, "cancel": False}
+_DL_LOCK = threading.Lock()  # rende atomico il check-and-set del download
+_NEEDS_DL = None  # memoizzato: True se il modello non è ancora su disco
+
+def model_cached(repo):
+    """True se il modello è già su disco (cartella locale o cache HF completa)."""
+    try:
+        if os.path.isdir(os.path.expanduser(repo)):
+            return any(f.endswith(".safetensors") for f in os.listdir(os.path.expanduser(repo)))
+        from huggingface_hub import snapshot_download
+        snapshot_download(repo, local_files_only=True)
+        return True
+    except Exception:
+        return False
+
+def download_model_stream(emit):
+    """Scarica MODEL da HuggingFace con progresso (GB/%/velocità). Pausa via _DL['cancel']."""
+    import threading, time as _t
+    os.environ["HF_HUB_OFFLINE"] = "0"; os.environ["TRANSFORMERS_OFFLINE"] = "0"
+    try:
+        from huggingface_hub import constants as _hc; _hc.HF_HUB_OFFLINE = False
+    except Exception: pass
+    from huggingface_hub import snapshot_download, HfApi
+    from huggingface_hub.utils import tqdm as _hf_tqdm
+    try:
+        info = HfApi().model_info(MODEL, files_metadata=True)
+        total = sum((s.size or 0) for s in info.siblings)
+    except Exception:
+        total = 0
+    _DL.update(got=0, total=total, active=True, cancel=False)
+    class _P(_hf_tqdm):
+        def update(self, n=1):
+            # somma solo le barre in byte (download file), non quella conta-file
+            if getattr(self, "unit", "") in ("B", "iB") or (getattr(self, "total", 0) or 0) > 100000:
+                _DL["got"] += n
+            if _DL["cancel"]: raise KeyboardInterrupt("paused")
+            return super().update(n)
+    stop = threading.Event()
+    def pump():
+        last = (_DL["got"], _t.time())
+        while not stop.is_set():
+            _t.sleep(0.5)
+            now = _t.time(); g = _DL["got"]; tot = _DL["total"] or 1
+            speed = (g - last[0]) / max(1e-6, now - last[1]); last = (g, now)
+            emit({"gotGB": round(g / 1e9, 1), "totalGB": round(tot / 1e9, 1),
+                  "pct": min(100, int(g / tot * 100)), "speed": round(speed / 1e6, 1)})
+    th = threading.Thread(target=pump, daemon=True); th.start()
+    try:
+        snapshot_download(MODEL, tqdm_class=_P)
+        emit({"downloaded": True})
+    except KeyboardInterrupt:
+        emit({"paused": True, "gotGB": round(_DL["got"] / 1e9, 1)})
+    except Exception as e:
+        emit({"error": str(e)[:200]})
+    finally:
+        stop.set(); _DL["active"] = False
+        os.environ["HF_HUB_OFFLINE"] = "1"; os.environ["TRANSFORMERS_OFFLINE"] = "1"
+        try:
+            from huggingface_hub import constants as _hc2; _hc2.HF_HUB_OFFLINE = True
+        except Exception: pass
+
 def config_payload():
     return {"model": CFG["model"], "loaded_model": MODEL,
             "default_steps": CFG["default_steps"], "default_max_tokens": CFG["default_max_tokens"],
+            "ocr_engine": CFG.get("ocr_engine", "apple"),
             "paths": {"config": CONFIG_PATH, "python": sys.executable,
                       "script": os.path.abspath(__file__),
                       "hf_cache": os.path.expanduser("~/.cache/huggingface/hub")}}
@@ -615,6 +948,14 @@ PAGE = r"""<!DOCTYPE html><html lang="it"><head><meta charset="UTF-8">
   .chip .nm{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .chip .tk{color:var(--dim);flex:none}
   .chip .x{cursor:pointer;color:var(--dim);font-weight:700;flex:none}.chip .x:hover{color:var(--accent)}
+  /* stati allegato: caricamento (spinner + "Leggo… (Ns)") -> pronto (pop + ✓ + token) */
+  @keyframes chpop{0%{transform:scale(.92)}55%{transform:scale(1.05)}100%{transform:scale(1)}}
+  .chip .spin{width:11px;height:11px;border-radius:50%;border:2px solid var(--accent);border-top-color:transparent;animation:bspin .7s linear infinite;flex:none}
+  .chip.loading{border-color:var(--accent)}
+  .chip.loading .nm{color:var(--accent-text)}
+  .chip .tk.load{color:var(--accent-text)}
+  .chip .ok{color:var(--accent-text);font-weight:700;flex:none}
+  .chip.ready{animation:chpop .3s ease-out}
   .attrow{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
   .attchip{display:flex;align-items:center;gap:5px;background:rgba(255,255,255,.2);border-radius:8px;padding:3px 8px;font-size:.74rem}
   .attchip img{width:24px;height:24px;object-fit:cover;border-radius:4px}
@@ -627,6 +968,10 @@ PAGE = r"""<!DOCTYPE html><html lang="it"><head><meta charset="UTF-8">
   #mic.rec{color:#fff;background:#e0245e;border-color:#e0245e}
   #send{position:absolute;right:8px;bottom:8px;width:30px;height:30px;background:var(--accent);color:var(--accent-ink);border:1px solid var(--accent);border-radius:9px;font-size:1rem;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1;transition:opacity .15s}
   #send:disabled{opacity:.35;cursor:not-allowed}
+  #send svg{width:16px;height:16px;display:block}
+  /* mentre legge il documento: il bottone invia diventa uno spinner (stato di lavoro) */
+  #send.loading{opacity:1;cursor:default;color:transparent}
+  #send.loading::after{content:'';position:absolute;left:50%;top:50%;width:15px;height:15px;margin:-7.5px 0 0 -7.5px;border-radius:50%;border:2px solid var(--accent-ink);border-top-color:transparent;animation:bspin .7s linear infinite}
   /* a una riga: pulsanti centrati verticalmente; quando la textarea cresce: ancorati in basso */
   .cbtn,#send{top:50%;bottom:auto;transform:translateY(-50%)}
   .composer.grown .cbtn,.composer.grown #send{top:auto;bottom:8px;transform:none}
@@ -676,7 +1021,7 @@ PAGE = r"""<!DOCTYPE html><html lang="it"><head><meta charset="UTF-8">
   header .badge,header .txtbtn,header .iconbtn{flex:none}
   .stepper button:active{background:var(--panel2)}
   .stepper button:disabled{opacity:.4;cursor:default}
-  @media (prefers-reduced-motion: reduce){ .bar::after,.caret,.sp{animation:none} .caret{opacity:.6} }
+  @media (prefers-reduced-motion: reduce){ .bar::after,.caret,.sp,.chip .spin,#send.loading::after,.chip.ready{animation:none} .caret{opacity:.6} }
 </style></head>
 <body>
   <header>
@@ -707,7 +1052,7 @@ Genero il testo "a blocchi" via diffusione. Chiedimi qualcosa!</div>
         <textarea id="inp" rows="1" placeholder="Carico il modello…" disabled autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
         <button id="attach" class="cbtn" title="Allega immagini o documenti" aria-label="Allega immagini o documenti"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5l-8.5 8.5a5 5 0 0 1-7.07-7.07l8.49-8.49a3.5 3.5 0 0 1 4.95 4.95l-8.49 8.49a1.5 1.5 0 0 1-2.12-2.12l7.78-7.78"/></svg></button>
         <button id="mic" class="cbtn" title="Dettatura (macOS): premi per avviare, ripremi per fermare" aria-label="Dettatura vocale" aria-pressed="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></button>
-        <button id="send" title="Invia" aria-label="Invia messaggio">↑</button>
+        <button id="send" title="Invia" aria-label="Invia messaggio"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
       </div>
       <input type="file" id="fileinput" multiple style="display:none" accept="image/*,.txt,.md,.markdown,.csv,.json,.log,.pdf,.docx,.xlsx,.xlsm,.py,.js,.ts,.tsx,.html,.css,.java,.c,.cpp,.h,.go,.rs,.sh,.yaml,.yml,.xml">
     </div>
@@ -747,6 +1092,14 @@ Genero il testo "a blocchi" via diffusione. Chiedimi qualcosa!</div>
         <div class="hint">Più step = testo più pulito ma più lento. Consigliato <b>32</b> (64 per codice/documenti).</div>
         <div class="row"><label>Max token risposta</label><div class="stepper" id="stTok"></div></div>
         <div class="hint">Lunghezza massima della risposta (1 token ≈ 0,75 parole). Il modello si ferma comunque da solo a fine risposta: un valore alto serve solo a non troncare.</div>
+
+        <h3>OCR documenti scansionati</h3>
+        <div class="seg" id="ocrseg">
+          <button data-o="apple">Apple Vision</button>
+          <button data-o="local">GLM locale</button>
+          <button data-o="omlx">Router oMLX</button>
+        </div>
+        <div class="hint"><b>GLM locale</b> (consigliato): potente e tutto dentro Gephid, non impalla.<br><b>Apple Vision</b>: leggero e integrato.<br><b>Router oMLX</b>: massima resa, ma richiede il server attivo.</div>
 
         <h3>Modello</h3>
         <div class="row"><label>Sul tuo Mac</label><select id="modelsel" style="flex:1;min-width:0"></select></div>
@@ -804,6 +1157,13 @@ Genero il testo "a blocchi" via diffusione. Chiedimi qualcosa!</div>
     const on=b.dataset.d==='on';localStorage.setItem('gephid-dictation',on?'1':'0');
     if(!on&&recording){await stopDict();}applyDict();});
 
+  // ---- OCR documenti: motore selezionabile (apple | omlx | paranoid) ----
+  function applyOcr(eng){document.querySelectorAll('#ocrseg button').forEach(b=>b.classList.toggle('active',b.dataset.o===eng));}
+  document.querySelectorAll('#ocrseg button').forEach(b=>b.onclick=async()=>{
+    applyOcr(b.dataset.o);
+    try{await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ocr_engine:b.dataset.o})});}catch(e){}
+  });
+
   // ---- config / impostazioni ----
   $('newchat').onclick=newChat;
   $('gear').onclick=()=>{$('ov').classList.add('on');loadModels();}; // ricarica la lista modelli all'apertura
@@ -828,6 +1188,7 @@ Genero il testo "a blocchi" via diffusione. Chiedimi qualcosa!</div>
     try{const c=await(await fetch('/api/config')).json();
       curSteps=c.default_steps;curMaxTok=c.default_max_tokens;
       stStep.set(c.default_steps);stTok.set(c.default_max_tokens);$('modelin').value=c.model;
+      applyOcr(c.ocr_engine||'apple');
     }catch(e){}
     cfgReady=true;
   }
@@ -955,8 +1316,15 @@ Genero il testo "a blocchi" via diffusione. Chiedimi qualcosa!</div>
 
   let aborter=null;
   // "invia" disabilitato quando non c'è nulla da inviare (ma sempre attivo come "ferma" durante la generazione)
-  function updateSendState(){send.disabled=(!busy)&&(!modelReady||(!inp.value.trim()&&!attachments.some(a=>a.id)));}
-  function setStopMode(on){send.textContent=on?'■':'↑';send.title=on?'Ferma':'Invia';send.setAttribute('aria-label',on?'Ferma generazione':'Invia messaggio');updateSendState();}
+  function updateSendState(){
+    const loading=attachments.some(a=>a.loading);
+    send.classList.toggle('loading', loading && !busy);   // spinner sul bottone mentre legge
+    send.disabled=(!busy)&&(!modelReady||loading||(!inp.value.trim()&&!attachments.some(a=>a.id)));
+    if(!busy) send.title=loading?'Sto leggendo il documento…':'Invia';
+  }
+  const ICON_SEND='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>';
+  const ICON_STOP='<svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/></svg>';
+  function setStopMode(on){send.innerHTML=on?ICON_STOP:ICON_SEND;send.title=on?'Ferma':'Invia';send.setAttribute('aria-label',on?'Ferma generazione':'Invia messaggio');updateSendState();}
   function stopGen(){if(aborter)try{aborter.abort();}catch(e){}}
   async function ask(){
     if(busy||!modelReady)return;
@@ -1010,7 +1378,7 @@ Genero il testo "a blocchi" via diffusione. Chiedimi qualcosa!</div>
       busy=false;aborter=null;setStopMode(false);inp.focus();
     }
   }
-  send.onclick=()=>{if(busy)stopGen();else ask();};
+  send.onclick=()=>{if(busy){stopGen();return;}if(attachments.some(a=>a.loading))return;ask();};
   // textarea si ingrandisce con le righe (fino a max, poi scroll)
   const composerEl=document.querySelector('.composer');
   function grow(){inp.style.height='auto';const sh=inp.scrollHeight;inp.style.height=Math.min(sh,170)+'px';
@@ -1030,12 +1398,23 @@ Genero il testo "a blocchi" via diffusione. Chiedimi qualcosa!</div>
   function renderChips(){
     const c=$('chips');c.textContent='';
     attachments.forEach(a=>{
-      const ch=document.createElement('div');ch.className='chip';
-      if(a.kind==='image'&&a.thumb){const im=document.createElement('img');im.src=a.thumb;ch.appendChild(im);}
+      const ch=document.createElement('div');
+      ch.className='chip'+(a.loading?' loading':'')+(a._justReady?' ready':'');
+      if(a._justReady)a._justReady=false;
+      if(a.loading){const sp=document.createElement('span');sp.className='spin';ch.appendChild(sp);}
+      else if(a.kind==='image'&&a.thumb){const im=document.createElement('img');im.src=a.thumb;ch.appendChild(im);}
       const nm=document.createElement('span');nm.className='nm';nm.textContent=a.name;ch.appendChild(nm);
-      if(a.loading){const t=document.createElement('span');t.className='tk';t.textContent='…';ch.appendChild(t);}
-      else if(a.kind==='doc'){const t=document.createElement('span');t.className='tk';t.textContent=a.tokens+' tok';ch.appendChild(t);}
-      const x=document.createElement('span');x.className='x';x.textContent='×';x.title='Rimuovi';x.onclick=()=>{attachments=attachments.filter(z=>z!==a);renderChips();};ch.appendChild(x);
+      if(a.loading){
+        const t=document.createElement('span');t.className='tk load';ch.appendChild(t);
+        const t0=a.t0||Date.now();
+        const upd=()=>{t.textContent='Leggo… ('+Math.floor((Date.now()-t0)/1000)+'s)';};upd();
+        const iv=setInterval(()=>{if(!t.isConnected||!a.loading){clearInterval(iv);return;}upd();},1000);
+      }else if(a.kind==='doc'){
+        const ok=document.createElement('span');ok.className='ok';ok.textContent='✓';ch.appendChild(ok);
+        const t=document.createElement('span');t.className='tk';t.textContent=a.tokens+' tok';ch.appendChild(t);
+      }
+      const x=document.createElement('span');x.className='x';x.textContent='×';x.title=a.loading?'Annulla lettura':'Rimuovi';
+      x.onclick=()=>{if(a.loading&&a._ctrl){try{a._ctrl.abort();}catch(e){}}attachments=attachments.filter(z=>z!==a);renderChips();};ch.appendChild(x);
       c.appendChild(ch);
     });
     updateSendState();
@@ -1043,12 +1422,13 @@ Genero il testo "a blocchi" via diffusione. Chiedimi qualcosa!</div>
   async function ingestPath(path){
     const name=path.split('/').pop();
     const isImg=/\.(png|jpe?g|gif|webp|bmp|heic|tiff)$/i.test(name);
-    const ph={id:null,kind:isImg?'image':'doc',name:name,tokens:0,loading:true,thumb:null};
+    const ph={id:null,kind:isImg?'image':'doc',name:name,tokens:0,loading:true,thumb:null,t0:Date.now(),_ctrl:null};
+    try{ph._ctrl=new AbortController();}catch(e){}
     attachments.push(ph);renderChips();
     try{
-      const r=await(await fetch('/api/ingest',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:path})})).json();
+      const r=await(await fetch('/api/ingest',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:path}),signal:ph._ctrl&&ph._ctrl.signal})).json();
       if(r.error){attachments=attachments.filter(z=>z!==ph);addError('Errore allegato "'+name+'": '+r.error);}
-      else{ph.id=r.id;ph.kind=r.kind;ph.tokens=r.tokens||0;ph.loading=false;}
+      else{ph.id=r.id;ph.kind=r.kind;ph.tokens=r.tokens||0;ph.loading=false;ph._justReady=true;}
       renderChips();
     }catch(err){attachments=attachments.filter(z=>z!==ph);renderChips();}
   }
@@ -1064,12 +1444,13 @@ Genero il testo "a blocchi" via diffusione. Chiedimi qualcosa!</div>
     for(const f of files){
       const isImg=(f.type||'').startsWith('image/');
       let b64;try{b64=await fileToB64(f);}catch(err){continue;}
-      const ph={id:null,kind:isImg?'image':'doc',name:f.name,tokens:0,loading:true,thumb:isImg?('data:'+(f.type||'image/png')+';base64,'+b64):null};
+      const ph={id:null,kind:isImg?'image':'doc',name:f.name,tokens:0,loading:true,thumb:isImg?('data:'+(f.type||'image/png')+';base64,'+b64):null,t0:Date.now(),_ctrl:null};
+      try{ph._ctrl=new AbortController();}catch(e){}
       attachments.push(ph);renderChips();
       try{
-        const r=await(await fetch('/api/ingest',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:f.name,content:b64})})).json();
+        const r=await(await fetch('/api/ingest',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:f.name,content:b64}),signal:ph._ctrl&&ph._ctrl.signal})).json();
         if(r.error){attachments=attachments.filter(z=>z!==ph);addError('Errore allegato "'+f.name+'": '+r.error);}
-        else{ph.id=r.id;ph.kind=r.kind;ph.tokens=r.tokens||0;ph.loading=false;}
+        else{ph.id=r.id;ph.kind=r.kind;ph.tokens=r.tokens||0;ph.loading=false;ph._justReady=true;}
         renderChips();
       }catch(err){attachments=attachments.filter(z=>z!==ph);renderChips();}
     }
@@ -1260,6 +1641,22 @@ LOGO_SVG = '''<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" styl
 
 FULL_PAGE = PAGE.replace("__LOGO__", LOGO_SVG)  # precompilata una volta (il logo è costante)
 
+# Redesign "Terminale × Cifra": la nuova UI vive in page.html accanto a questo file.
+# Servita su /new finché non è completa; poi diventerà la "/" di default. Caricata a ogni
+# richiesta in dev (così posso iterare senza riavviare); in bundle è statica.
+_PAGE_CACHE = {"mtime": None, "html": None}
+def _load_new_page():
+    try:
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "page.html")
+        m = os.path.getmtime(p)  # cache in memoria: rilegge solo se il file cambia (hot-reload in dev, zero I/O in prod)
+        if _PAGE_CACHE["mtime"] != m:
+            with open(p, encoding="utf-8") as f:
+                _PAGE_CACHE["html"] = f.read()
+            _PAGE_CACHE["mtime"] = m
+        return _PAGE_CACHE["html"]
+    except Exception as e:
+        return "<!doctype html><meta charset=utf-8><body style='font-family:monospace;padding:40px'>page.html non trovata: " + str(e) + "</body>"
+
 class H(http.server.BaseHTTPRequestHandler):
     timeout = 120  # un client lento/bloccato non tiene occupato il thread per sempre
     def log_message(self, *a): pass
@@ -1270,12 +1667,18 @@ class H(http.server.BaseHTTPRequestHandler):
         for k, v in (extra or {}).items(): self.send_header(k, v)
         self.end_headers(); self.wfile.write(b)
     def do_GET(self):
-        if self.path == "/":
+        if self.path == "/" or self.path == "/new":  # nuova UI "Terminale × Cifra" (default)
+            self._send(200, _load_new_page(), "text/html; charset=utf-8")
+        elif self.path == "/old":  # vecchia UI, fallback durante la transizione
             self._send(200, FULL_PAGE, "text/html; charset=utf-8")
         elif self.path == "/api/config":
             self._send(200, json.dumps(config_payload()))
         elif self.path == "/api/health":
-            self._send(200, json.dumps({"model_ok": MODEL_OK, "model_err": MODEL_ERR[:300], "model": MODEL}))
+            global _NEEDS_DL
+            if _NEEDS_DL is None and not MODEL_OK and not MODEL_ERR:
+                _NEEDS_DL = not model_cached(MODEL)
+            self._send(200, json.dumps({"model_ok": MODEL_OK, "model_err": MODEL_ERR[:300], "model": MODEL,
+                                        "needs_download": bool(_NEEDS_DL) and not MODEL_OK}))
         elif self.path == "/api/models":
             self._send(200, json.dumps({"models": list_local_models(), "current": MODEL}))
         elif self.path.startswith("/static/"):
@@ -1307,6 +1710,11 @@ class H(http.server.BaseHTTPRequestHandler):
         origin = self.headers.get("Origin")
         if origin and origin not in (f"http://localhost:{PORT}", f"http://127.0.0.1:{PORT}"):
             self._send(403, json.dumps({"error": "Origin non consentita."})); return
+        # anti DNS-rebinding: l'Host deve essere locale (blocca un dominio esterno rimappato su 127.0.0.1).
+        # Copre anche il caso di POST senza header Origin (client browser fanno comunque richieste con Host).
+        host = (self.headers.get("Host") or "").rsplit(":", 1)[0]
+        if host not in ("localhost", "127.0.0.1"):
+            self._send(403, json.dumps({"error": "Host non consentito."})); return
         try: req = json.loads(self.rfile.read(n)) if n else {}
         except Exception: req = {}
         if self.path == "/api/chat":
@@ -1333,6 +1741,8 @@ class H(http.server.BaseHTTPRequestHandler):
                 chat_id = req.get("chat_id") or "default"
                 steps = _coerce_int(req.get("steps"), STEP_MIN, STEP_MAX, CFG["default_steps"])
                 mtok = _coerce_int(req.get("max_tokens"), TOK_MIN, TOK_MAX, CFG["default_max_tokens"])
+                reveal = bool(req.get("reveal", False))  # "formazione dal rumore" (unmasking-draft)
+                cont = bool(req.get("cont", False))      # continuazione di un parziale interrotto
                 attach = req.get("attach") or []
                 img_paths = []
                 for i in attach:
@@ -1341,8 +1751,9 @@ class H(http.server.BaseHTTPRequestHandler):
                 doc_ids = [i for i in attach if i in INGEST and INGEST[i]["kind"] == "doc"]
                 raw_msgs = req.get("messages", [])
                 def work(job):  # gira sul thread-worker del modello
-                    msgs = fit_context(raw_msgs, chat_id)
-                    if doc_ids:  # accoda il contesto documenti all'ultimo messaggio utente
+                    msgs = fit_context(raw_msgs, chat_id, on_status=lambda s: job.q.put(("status", s)))
+                    # in continuazione l'ultimo messaggio è l'assistant parziale: non toccarlo col contesto-documenti
+                    if doc_ids and not (cont and msgs and msgs[-1].get("role") == "assistant"):
                         doc_ctx = build_doc_context(doc_ids, lambda s: job.q.put(("status", s)), job.cancel)
                         if doc_ctx and msgs:
                             msgs = msgs[:-1] + [{"role": msgs[-1]["role"],
@@ -1364,7 +1775,9 @@ class H(http.server.BaseHTTPRequestHandler):
                     def on_delta(d):
                         if job.cancel.is_set(): return False
                         job.q.put(("delta", d)); return True
-                    text, tps, dt = genera_stream(msgs, steps, eff_mtok, on_delta, images=img_paths or None)
+                    def on_event(ev):
+                        if not job.cancel.is_set(): job.q.put(("diff", ev))
+                    text, tps, dt = genera_stream(msgs, steps, eff_mtok, on_delta, images=img_paths or None, on_event=on_event, reveal=reveal, cont=cont)
                     job.q.put(("done", tps, dt))
                 stream_job(Job(work), emit)
             except Exception as e:
@@ -1418,21 +1831,8 @@ class H(http.server.BaseHTTPRequestHandler):
                 self._send(200, json.dumps({"error": str(e)[:200]}))
         elif self.path == "/api/save":
             content = req.get("content") or ""
-            chosen = req.get("path")
-            if chosen:  # path scelto dall'utente col pannello di salvataggio nativo
-                try:
-                    if req.get("b64"):
-                        with open(chosen, "wb") as f: f.write(base64.b64decode(content))
-                    else:
-                        with open(chosen, "w", encoding="utf-8") as f: f.write(content)
-                    try: subprocess.Popen(["open", "-R", chosen])
-                    except Exception: pass
-                    self._send(200, json.dumps({"ok": True, "path": chosen}))
-                except Exception as e:
-                    self._send(200, json.dumps({"ok": False, "error": str(e)[:200]}))
-                return
             # WKWebView non sa scaricare via <a download>/blob: salva lato server in ~/Downloads
-            # e rivela il file nel Finder (open -R).
+            # e rivela il file nel Finder (open -R). Nessuna scrittura su path arbitrari: solo ~/Downloads.
             name = os.path.basename(str(req.get("filename") or "gephid.txt")).lstrip(".") or "gephid.txt"
             try:
                 os.makedirs(DOWNLOADS_DIR, exist_ok=True)
@@ -1443,7 +1843,9 @@ class H(http.server.BaseHTTPRequestHandler):
                 if os.path.exists(path):  # non sovrascrivere: aggiungi suffisso
                     base, ex = os.path.splitext(name)
                     path = os.path.join(DOWNLOADS_DIR, base + "-" + uuid.uuid4().hex[:6] + ex)
-                if req.get("b64"):
+                if req.get("pdf"):
+                    with open(path, "wb") as f: f.write(_html_to_pdf(content, req.get("footer") or ""))
+                elif req.get("b64"):
                     with open(path, "wb") as f: f.write(base64.b64decode(content))
                 else:
                     with open(path, "w", encoding="utf-8") as f: f.write(content)
@@ -1477,7 +1879,37 @@ class H(http.server.BaseHTTPRequestHandler):
         elif self.path == "/api/config":
             CFG["default_steps"] = _coerce_int(req.get("default_steps"), STEP_MIN, STEP_MAX, CFG["default_steps"])
             CFG["default_max_tokens"] = _coerce_int(req.get("default_max_tokens"), TOK_MIN, TOK_MAX, CFG["default_max_tokens"])
+            oe = str(req.get("ocr_engine", CFG.get("ocr_engine", "apple"))).lower()
+            if oe in ("apple", "local", "omlx", "paranoid"):
+                CFG["ocr_engine"] = oe
+                globals()["OCR_ENGINE"] = oe   # effetto immediato sui prossimi ingest, senza riavvio
             save_config(CFG)
+            self._send(200, json.dumps({"ok": True}))
+        elif self.path == "/api/download":
+            # Scarica il modello (primo avvio) in streaming NDJSON. Gira su un thread dedicato:
+            # è I/O di rete, non tocca la GPU né il worker del modello.
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache"); self.end_headers()
+            def emitD(obj):
+                try: self.wfile.write((json.dumps(obj) + "\n").encode()); self.wfile.flush(); return True
+                except Exception: return False
+            with _DL_LOCK:
+                already = _DL["active"]
+                if not already: _DL["active"] = True
+            try:
+                if already:
+                    emitD({"error": "download già in corso"})
+                else:
+                    download_model_stream(emitD)
+            except Exception as e:
+                emitD({"error": str(e)[:200]})
+            finally:
+                if not already:  # se l'ho attivato io, garantisco il reset anche se download_model_stream è esploso prima del suo finally
+                    with _DL_LOCK: _DL["active"] = False
+            global _NEEDS_DL; _NEEDS_DL = not model_cached(MODEL)
+        elif self.path == "/api/download/pause":
+            _DL["cancel"] = True
             self._send(200, json.dumps({"ok": True}))
         else:
             self._send(404, "{}")
@@ -1487,13 +1919,43 @@ class GephidServer(http.server.ThreadingHTTPServer):
     # risposta). Le ops del modello restano su un solo thread, il worker.
     daemon_threads = True
     request_queue_size = 128
+    allow_reuse_address = True  # esplicito: al restart (supervisione del launcher) il bind sulla porta non deve fallire
+
+IS_BUNDLED = ".app/Contents/Resources" in os.path.realpath(__file__)  # True solo dentro la .app
+BUILD = "2026-06-25b"  # marker di build: compare in ~/gephid-backend.log per verificare la versione in uso
+
+def _launcher_watchdog():
+    """Spegne il backend SOLO quando nessun launcher Gephid è più vivo (tutte le finestre chiuse).
+    Si basa sulla PRESENZA del processo launcher, non sull'heartbeat della pagina: così il backend
+    resta vivo finché c'è almeno una finestra aperta, anche in background quando macOS rallenta i
+    timer JS (era questa la causa del 'Backend non raggiungibile dopo un po'). Per i dev (script
+    fuori dalla .app) il watchdog non parte affatto."""
+    import subprocess
+    grace = time.time() + 30   # margine all'avvio: lascia comparire il launcher
+    misses = 0
+    while True:
+        time.sleep(5)
+        try:
+            out = subprocess.run(["pgrep", "-f", "Gephid.app/Contents/MacOS/Gephid"],
+                                 capture_output=True, text=True, timeout=4).stdout
+            if any(x.strip() for x in out.split()):
+                misses = 0
+            elif time.time() > grace:
+                misses += 1
+                if misses >= 2:  # due check a vuoto consecutivi (~10s) per evitare falsi positivi
+                    print("nessun launcher Gephid vivo → spengo il backend", flush=True)
+                    os._exit(0)
+        except Exception:
+            misses = 0  # nel dubbio non spegnere
 
 if __name__ == "__main__":
     srv = GephidServer(("127.0.0.1", PORT), H)  # solo loopback
     # Server HTTP su thread daemon; il main thread carica il modello e poi fa da worker.
     # MLX richiede che le ops del modello girino sul thread che ha caricato i pesi.
     threading.Thread(target=srv.serve_forever, daemon=True, name="gephid-http").start()
-    print(f"diffuchat attivo su http://localhost:{PORT} (carico il modello…)", flush=True)
+    if IS_BUNDLED:  # nel bundle: spegniti quando l'ultima finestra si chiude (non quando è solo idle)
+        threading.Thread(target=_launcher_watchdog, daemon=True, name="gephid-watchdog").start()
+    print(f"diffuchat build {BUILD} attivo su http://localhost:{PORT} (carico il modello…)", flush=True)
     load_model()  # sul main thread, mentre il server già risponde /api/health (model_ok=false)
     try:
         _model_worker()  # processa i job del modello sul thread principale

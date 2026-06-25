@@ -1,4 +1,4 @@
-# Gephid — guida progetto
+# Architettura di Gephid
 
 App nativa macOS (Apple Silicon) che dà a DiffusionGemma una chat in stile ChatGPT,
 100% offline, racchiusa in un'unica `.app`. Il modello resta esterno e configurabile.
@@ -9,7 +9,7 @@ Nome: **Ge**mma + **diffusion**, scritto come "zaffiro".
 Gephid/
 ├── build.sh                  # build della .app da zero
 ├── BUILD.md                  # guida di build (.app; nota su Windows/.exe)
-├── README.md  README.it.md  CLAUDE.md  LICENSE
+├── README.md  README.it.md  ARCHITECTURE.md  LICENSE
 ├── assets/icon.icns          # icona (serratura royalblue inclinata 13.37°)
 ├── src/
 │   ├── backend/

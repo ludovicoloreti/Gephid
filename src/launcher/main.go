@@ -79,18 +79,31 @@ static void startSegment(void) {
       if (g_partial.length) g_final = [NSString stringWithFormat:@"%@%@%@", g_final, (g_final.length ? @" " : @""), g_partial];
       g_partial = @"";
       [g_lock unlock];
-      if (g_engine) startSegment(); // riprova finché il mic è attivo
+      // riavvia con un piccolo backoff (evita lo spin se il recognizer erra di continuo)
+      if (g_engine) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(120 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{ if (g_engine) startSegment(); });
     }
   }];
 }
-// 0 = ok, -1 = recognizer non disponibile, -2 = microfono/audio non avviabile
+// 0 = ok · -1 = recognizer non disponibile · -2 = microfono/audio non avviabile
+// -3 = permesso non ancora deciso (richiesto ora: approvarlo e riprovare) · -4 = permesso negato
 static int gephidDictStart(void) {
   if (!g_lock) gephidDictInit();
   [g_lock lock]; g_final = @""; g_partial = @""; [g_lock unlock];
   if (g_engine) return 0; // già attivo
-  if ([SFSpeechRecognizer authorizationStatus] != SFSpeechRecognizerAuthorizationStatusAuthorized) {
+  // permesso riconoscimento vocale
+  SFSpeechRecognizerAuthorizationStatus sa = [SFSpeechRecognizer authorizationStatus];
+  if (sa == SFSpeechRecognizerAuthorizationStatusNotDetermined) {
     [SFSpeechRecognizer requestAuthorization:^(SFSpeechRecognizerAuthorizationStatus s){}];
+    return -3;
   }
+  if (sa == SFSpeechRecognizerAuthorizationStatusDenied || sa == SFSpeechRecognizerAuthorizationStatusRestricted) return -4;
+  // permesso microfono (separato dal riconoscimento vocale)
+  AVAuthorizationStatus ma = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio];
+  if (ma == AVAuthorizationStatusNotDetermined) {
+    [AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio completionHandler:^(BOOL g){}];
+    return -3;
+  }
+  if (ma == AVAuthorizationStatusDenied || ma == AVAuthorizationStatusRestricted) return -4;
   NSLocale *loc = [NSLocale localeWithLocaleIdentifier:@"it-IT"];
   g_recog = [[SFSpeechRecognizer alloc] initWithLocale:loc];
   if (!g_recog) g_recog = [[SFSpeechRecognizer alloc] init];
@@ -181,6 +194,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -206,6 +222,77 @@ func initPort(home string) {
 	backendURL = fmt.Sprintf("http://localhost:%d/", port)
 	healthURL = fmt.Sprintf("http://localhost:%d/api/health", port)
 	backendAddr = fmt.Sprintf("127.0.0.1:%d", port)
+}
+
+// otherLaunchersAlive: esistono ALTRE finestre Gephid (launcher) oltre a me?
+// Serve per non uccidere il backend condiviso quando si chiude una finestra mentre altre sono aperte.
+func otherLaunchersAlive() bool {
+	out, err := exec.Command("pgrep", "-f", "Gephid.app/Contents/MacOS/Gephid").Output()
+	if err != nil {
+		return false
+	}
+	self := os.Getpid()
+	for _, f := range strings.Fields(string(out)) {
+		if pid, e := strconv.Atoi(f); e == nil && pid != 0 && pid != self {
+			if syscall.Kill(pid, 0) == nil { // ancora vivo
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// killBackend: spegne il backend. Se l'ho avviato io (cmd) uccido il gruppo; altrimenti lo trovo per porta.
+func killBackend(cmd *exec.Cmd) {
+	if cmd != nil && cmd.Process != nil {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		return
+	}
+	out, err := exec.Command("lsof", "-ti", "tcp:"+strconv.Itoa(portFromAddr())).Output()
+	if err != nil {
+		return
+	}
+	for _, f := range strings.Fields(string(out)) {
+		if pid, e := strconv.Atoi(f); e == nil && pid > 0 {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+	}
+}
+
+// startBackend avvia il backend Python come sottoprocesso: gruppo proprio (killabile coi figli),
+// env pulito (l'env "ricco" di launchd fa impallare l'interprete), log in append su ~/gephid-backend.log.
+// Ritorna il comando e un canale che riceve l'esito quando il processo muore.
+func startBackend(py, script, home string) (*exec.Cmd, chan error, error) {
+	cmd := exec.Command(py, script)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Env = []string{
+		"HOME=" + home,
+		"PATH=/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+		"TMPDIR=" + os.TempDir(),
+		"HF_HUB_OFFLINE=1", "TRANSFORMERS_OFFLINE=1", "TOKENIZERS_PARALLELISM=false",
+	}
+	if lf, err := os.OpenFile(filepath.Join(home, "gephid-backend.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
+		cmd.Stdout = lf
+		cmd.Stderr = lf
+	} else {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, nil, err
+	}
+	died := make(chan error, 1)
+	go func() { died <- cmd.Wait() }()
+	return cmd, died, nil
+}
+
+func portFromAddr() int {
+	if i := strings.LastIndex(backendAddr, ":"); i >= 0 {
+		if p, e := strconv.Atoi(backendAddr[i+1:]); e == nil {
+			return p
+		}
+	}
+	return 8890
 }
 
 // portOpen: qualcuno ascolta già sulla porta (anche se non risponde ancora HTTP)?
@@ -250,20 +337,33 @@ func safeDispatch(w webview.WebView, closed <-chan struct{}, f func()) {
 	}
 }
 
-const logoSVG = `<svg viewBox="0 0 512 512" width="76" height="76" xmlns="http://www.w3.org/2000/svg"><rect x="40" y="40" width="432" height="432" rx="104" fill="#4169E1"/><g transform="rotate(13.37 256 256)" fill="#fff"><ellipse cx="254" cy="210" rx="58" ry="52"/><path d="M247 250 L266 250 L302 372 Q307 391 287 388 L227 378 Q213 376 219 359 Z"/></g></svg>`
+// lucchetto del brand (line-art, inclinato −13.37°) — stesso della UI e della materializzazione
+const logoSVG = `<svg width="62" height="62" viewBox="0 0 24 24" fill="none"><path d="M8 10V7a4 4 0 0 1 8 0v3" stroke="#4169E1" stroke-width="2.1" stroke-linecap="round"></path><rect x="4.6" y="10" width="14.8" height="9.6" rx="3" fill="#4169E1"></rect><circle cx="12" cy="14.4" r="1.5" fill="#070a10"></circle></svg>`
 
+// Loader nativo: UN solo linguaggio visivo con la materializzazione della pagina (sfondo scuro + lucchetto
+// che pulsa, niente spinner circolare). Fa solo da fade verso la materializzazione (griglia 4×4 + %).
 func page(title, msg string, spin bool) string {
-	sp := ""
+	pulse := ""
 	if spin {
-		sp = `<div class="sp"></div>`
+		pulse = " pulsing"
 	}
 	return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
 	html,body{height:100%;margin:0}
-	body{background:#0b0e14;color:#e6edf3;font-family:-apple-system,'Segoe UI',sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:18px;padding:40px}
-	.t{font-size:1.35rem;font-weight:600}.m{color:#8b98a5;max-width:540px;line-height:1.6}
-	.sp{width:34px;height:34px;border:3px solid #1c2333;border-top-color:#4169e1;border-radius:50%;animation:s 1s linear infinite}
-	@keyframes s{to{transform:rotate(360deg)}} code{background:#141925;padding:2px 7px;border-radius:6px;color:#4169e1}
-	</style></head><body>` + logoSVG + `<div class="t">` + title + `</div>` + sp + `<div class="m">` + msg + `</div></body></html>`
+	body{background:#070a10;color:#e6edf3;font-family:-apple-system,'Segoe UI',sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:16px;padding:40px}
+	.lk{display:inline-flex;transform:rotate(-13.37deg);filter:drop-shadow(0 0 18px rgba(65,105,225,.6))}
+	.lk.pulsing{animation:pulse 1.7s ease-in-out infinite}
+	@keyframes pulse{0%,100%{filter:drop-shadow(0 0 12px rgba(65,105,225,.45))}50%{filter:drop-shadow(0 0 34px rgba(65,105,225,1))}}
+	.t{font-size:1.18rem;font-weight:700;letter-spacing:-.01em}
+	.m{color:#7f8b9a;max-width:540px;line-height:1.6;font-size:.9rem}
+	.tk{margin-top:8px;font-family:'Courier New',monospace;font-size:.72rem;letter-spacing:.1em;color:#3DF9A6}
+	code{background:#10182a;padding:2px 7px;border-radius:6px;color:#8ab0ff;font-family:'Courier New',monospace}
+	@media (prefers-color-scheme: light){
+	  body{background:#f4f6f9;color:#1a2230}
+	  .m{color:#5b6675}
+	  .tk{color:#067a45}
+	  code{background:#e9edf3;color:#2f4fc0}
+	}
+	</style></head><body><span class="lk` + pulse + `">` + logoSVG + `</span><div class="t">` + title + `</div><div class="m">` + msg + `</div><div class="tk">NO-NET · 0xLOCAL · NESSUN BYTE ESCE</div></body></html>`
 }
 
 func main() {
@@ -280,10 +380,12 @@ func main() {
 		script = home + "/Desktop/AI/Gephid/src/backend/diffuchat.py"
 	}
 
+	var bmu sync.Mutex // protegge cmd (il backend corrente può cambiare se viene riavviato)
 	var cmd *exec.Cmd
-	procDied := make(chan error, 1)
+	var procDied chan error
+	iStartedIt := false
 	// Avvio il backend solo se la porta è libera. Se è già occupata (istanza
-	// esistente o in boot), la riuso e non la killo all'uscita (cmd resta nil).
+	// esistente o in boot), la riuso e non la supervisiono: non è mia.
 	if !portOpen() {
 		if _, err := os.Stat(py); err != nil {
 			w := webview.New(false)
@@ -295,25 +397,8 @@ func main() {
 			w.Destroy()
 			return
 		}
-		cmd = exec.Command(py, script)
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} // gruppo proprio → killabile coi figli
-		// Ambiente pulito: lanciata via .app, l'env "ricco" di launchd fa impallare
-		// l'avvio dell'interprete Python. Un env minimale lo fa partire regolarmente.
-		cmd.Env = []string{
-			"HOME=" + home,
-			"PATH=/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-			"TMPDIR=" + os.TempDir(),
-			"HF_HUB_OFFLINE=1", "TRANSFORMERS_OFFLINE=1", "TOKENIZERS_PARALLELISM=false",
-		}
-		// I log del backend finiscono in un file (lanciata via .app non c'è un terminale)
-		if lf, err := os.Create(filepath.Join(home, "gephid-backend.log")); err == nil {
-			cmd.Stdout = lf
-			cmd.Stderr = lf
-		} else {
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-		}
-		if err := cmd.Start(); err != nil { // non ingoiare l'errore di avvio
+		c, died, err := startBackend(py, script, home)
+		if err != nil { // non ingoiare l'errore di avvio
 			w := webview.New(false)
 			w.SetTitle("Gephid — avvio fallito")
 			w.SetSize(640, 380, webview.HintNone)
@@ -323,7 +408,7 @@ func main() {
 			w.Destroy()
 			return
 		}
-		go func() { procDied <- cmd.Wait() }() // segnala se il processo muore prima del pronto
+		cmd, procDied, iStartedIt = c, died, true
 	}
 
 	w := webview.New(false)
@@ -358,43 +443,107 @@ func main() {
 	w.SetTitle("Gephid")
 	w.SetSize(980, 820, webview.HintNone)
 	w.SetHtml(page("Carico Gephid…",
-		"Il modello a diffusione si sta caricando (~15-30s al primo avvio).<br>Si prega di attendere per cortesia.", true))
+		"Monto il modello a diffusione in memoria (~15–30s al primo avvio).", true))
 
 	closed := make(chan struct{})
+	done := make(chan struct{}) // chiuso quando la goroutine di supervisione è davvero terminata
 	go func() {
+		defer close(done)
+		// FASE 1 — boot iniziale: aspetto che il backend risponda, poi navigo alla UI.
 		deadline := time.Now().Add(120 * time.Second) // tetto basato su orologio reale
+		booted := false
 		for time.Now().Before(deadline) {
 			select {
-			case err := <-procDied: // il backend è morto prematuramente
+			case err := <-procDied: // morto durante il boot: di solito è un crash d'avvio persistente, mostro l'errore
 				msg := "Il backend Python si è chiuso inaspettatamente."
 				if err != nil {
 					msg += "<br><br><code>" + html.EscapeString(err.Error()) + "</code>"
 				}
-				msg += "<br><br>Controlla i log nel Terminale."
+				msg += "<br><br>Controlla <code>~/gephid-backend.log</code>."
 				safeDispatch(w, closed, func() { w.SetHtml(page("Backend terminato", msg, false)) })
 				return
 			case <-closed:
 				return
 			default:
 			}
-			reachable, _, _ := checkHealth() // la UI è servita dal backend; gli errori del modello compaiono in chat o nelle Impostazioni
-			if reachable {
-				safeDispatch(w, closed, func() { w.Navigate(backendURL) })
-				return
+			if reachable, _, _ := checkHealth(); reachable { // la UI è servita dal backend
+				booted = true
+				break
 			}
 			time.Sleep(1 * time.Second)
 		}
-		safeDispatch(w, closed, func() {
-			w.SetHtml(page("Backend non pronto",
-				"Gephid non si è avviata entro 120s. Chiudi e riprova, o controlla i log.", false))
-		})
+		if !booted {
+			safeDispatch(w, closed, func() {
+				w.SetHtml(page("Backend non pronto",
+					"Gephid non si è avviata entro 120s. Chiudi e riprova, o controlla i log.", false))
+			})
+			return
+		}
+		safeDispatch(w, closed, func() { w.Navigate(backendURL) })
+
+		// FASE 2 — supervisione: se il backend muore mentre la finestra è aperta, lo riavvio.
+		// La pagina resta caricata e il suo heartbeat (/api/health) fa sparire da solo l'overlay
+		// "Backend non raggiungibile" appena il backend torna su (e così "Ricarica" funziona di
+		// nuovo). Non rinavigo: la chat in corso non va persa.
+		if !iStartedIt {
+			<-closed // backend di un'altra istanza: non lo gestisco io
+			return
+		}
+		lastStart := time.Now()
+		restarts := 0
+		for {
+			select {
+			case <-closed:
+				return
+			case <-procDied: // backend morto
+			}
+			if time.Since(lastStart) > 60*time.Second {
+				restarts = 0 // era stabile da un po': azzero il contatore dei tentativi
+			}
+			for { // riavvio con backoff progressivo; mi arrendo dopo troppi tentativi ravvicinati
+				select {
+				case <-closed:
+					return
+				default:
+				}
+				restarts++
+				if restarts > 6 {
+					fmt.Println("Gephid: backend instabile, smetto di riavviarlo")
+					return
+				}
+				select { // backoff progressivo, ma interrompibile dalla chiusura della finestra
+				case <-closed:
+					return
+				case <-time.After(time.Duration(restarts) * time.Second):
+				}
+				c, died, err := startBackend(py, script, home)
+				if err == nil {
+					bmu.Lock()
+					cmd = c
+					bmu.Unlock()
+					procDied = died
+					lastStart = time.Now()
+					break
+				}
+				fmt.Println("Gephid: riavvio backend fallito:", err)
+			}
+		}
 	}()
 
 	w.Run() // blocca finché non chiudi la finestra
 	close(closed)
+	<-done // aspetto che la supervisione termini davvero: così cmd è stabile e non viene riavviato dopo il kill
 
-	if cmd != nil && cmd.Process != nil {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) // spegni backend + figli (solo se l'ho avviato io)
+	// Spegni il backend SOLO se sono l'ultima finestra Gephid: altrimenti orfanerei le altre.
+	// Se restano altre finestre, lo lascio vivo (il launcher-watchdog del backend lo spegnerà
+	// comunque quando davvero non resta nessun launcher).
+	if otherLaunchersAlive() {
+		fmt.Println("Gephid: altre finestre aperte, lascio il backend attivo.")
+	} else {
+		bmu.Lock()
+		c := cmd
+		bmu.Unlock()
+		killBackend(c)
+		fmt.Println("Gephid: ultima finestra chiusa, backend spento.")
 	}
-	fmt.Println("Gephid: finestra chiusa, backend spento.")
 }

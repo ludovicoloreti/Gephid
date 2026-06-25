@@ -5,3 +5,10 @@ __pycache__/
 
 # artefatto buildato: si ricrea con ./build.sh, non va in git (~1GB col python embeddato)
 Gephid.app/
+design/
+
+# guida locale e brief di design (non pubblicati)
+CLAUDE.md
+ARCHITETTURA.md
+DESIGN_BRIEF.md
+DESIGN_BRIEF_APPENDIX.md
