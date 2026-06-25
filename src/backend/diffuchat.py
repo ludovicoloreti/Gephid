@@ -19,10 +19,11 @@ STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 # Pre-prompt di default: DiffusionGemma non ha un ruolo "system", quindi queste istruzioni
 # vengono anteposte al primo turno utente per ancorarne il comportamento. Modificabile dalle Impostazioni.
 SYS_DEFAULT = ("Segui con precisione le istruzioni dell'utente e usa il contesto della conversazione. "
-               "Rispondi nella sua lingua, in modo diretto e ordinato. Non inventare: se non conosci "
-               "un dato (nomi, date, fatti), dillo invece di indovinare. Niente emoji.")
+               "Rispondi nella sua lingua, in modo diretto e ordinato. Non inventare: su nomi, date e "
+               "fatti riporta solo ciò di cui sei certo e segnala il resto come 'da verificare'. "
+               "Niente emoji.")
 DEFAULTS = {"model": "mlx-community/diffusiongemma-26B-A4B-it-8bit",
-            "port": 8890, "default_steps": 32, "default_max_tokens": 32768,
+            "port": 8890, "default_steps": 48, "default_max_tokens": 32768,
             "ocr_engine": "local",  # apple (Apple Vision) | local (GLM-OCR in-process) | omlx | paranoid (router oMLX)
             "system_prompt": SYS_DEFAULT}
 STEP_MIN, STEP_MAX = 16, 64   # sotto 16 il modello a diffusione degenera su testi lunghi
