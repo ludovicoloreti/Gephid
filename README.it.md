@@ -68,11 +68,29 @@ cd Gephid
 rapido e nota su Windows/`.exe`: **[BUILD.it.md](BUILD.it.md)**.
 
 ## Requisiti
-- macOS su Apple Silicon (M1 o successivi).
-- Circa 30 GB liberi per i pesi del modello (in `~/.cache/huggingface/hub`).
+- Mac **Apple Silicon** (M1 o più recente). I Mac Intel non sono supportati: l'inferenza usa MLX, solo Apple Silicon.
+- **macOS 11** o più recente.
+- **Disco**: circa 30 GB liberi per il modello (sta in `~/.cache/huggingface/hub`).
+- **Internet solo al primo avvio** per scaricare il modello; poi gira tutto offline.
 - Per ribuildare dai sorgenti: Go e gli Xcode Command Line Tools.
 
-Modello di default: `mlx-community/diffusiongemma-26B-A4B-it-8bit` (circa 28 GB).
+### Memoria e quale modello usare
+Il modello deve stare in memoria unificata, quindi il quant giusto dipende dalla tua RAM. Il default
+è la versione 8-bit (`mlx-community/diffusiongemma-26B-A4B-it-8bit`, circa 26 GB su disco). Su Mac con
+meno RAM, passa a un quant più leggero da **Impostazioni → Modello** (incolla un id HuggingFace o una
+cartella locale). Gephid adatta da solo la lunghezza del contesto alla tua memoria, quindi su Mac più
+piccoli il contesto si accorcia invece di esaurire la memoria.
+
+| Memoria unificata | Versione consigliata | Peso su disco | Note |
+|---|---|---|---|
+| 64 GB o più | 8-bit (default) | ~26 GB | qualità migliore |
+| 48 GB | 8-bit | ~26 GB | funziona, contesto più corto |
+| 32 GB | 4-bit | ~13 GB | la 8-bit non ci sta comoda |
+| 24 GB | 4-bit | ~13 GB | contesto corto |
+| 16 GB | 4-bit, contesto breve | ~13 GB | al limite; meglio un modello più piccolo |
+
+Il modello è un mixture-of-experts da 26B con 4B di parametri attivi: è veloce per la sua taglia, ma
+tutti i pesi restano in memoria, quindi per la RAM conta la dimensione del quant intero, non i 4B attivi.
 
 ## Licenza
 [MIT](LICENSE). Usala, modificala e ridistribuiscila liberamente.
