@@ -8,6 +8,7 @@
 <script src="/static/purify.min.js"></script>
 <link rel="stylesheet" href="/static/katex.min.css">
 <script src="/static/katex.min.js"></script>
+<script src="/static/mhchem.min.js"></script><!-- chimica (\ce{}, \pu{}): va DOPO katex, registra le macro su di esso -->
 <script src="/static/auto-render.min.js"></script>
 <style>
   :root,[data-theme="dark"]{
@@ -229,6 +230,7 @@
   .expmenu .it.green{color:var(--live)} .expmenu .it svg{stroke:currentColor;fill:none}
   .expmenu .k{font-family:'Courier New',monospace;font-size:11px;color:var(--dim);width:15px;text-align:center}
   .expmenu .dv{height:1px;background:var(--line);margin:5px 8px}
+  .sr-only{position:absolute;width:1px;height:1px;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 </style>
 </head>
 <body>
@@ -280,7 +282,7 @@
   </div>
 </div></div>
 
-<input type="file" id="fileinput" multiple style="display:none">
+<input type="file" id="fileinput" multiple style="display:none" accept="image/*,.txt,.md,.markdown,.csv,.json,.log,.eml,.pdf,.docx,.xlsx,.xlsm,.py,.js,.ts,.tsx,.html,.css,.java,.c,.cpp,.h,.go,.rs,.sh,.yaml,.yml,.xml">
 
 <!-- ===== SETTINGS MODAL ===== -->
 <div class="scrim hidden" id="settings" role="dialog" aria-modal="true" aria-label="Settings">
@@ -297,9 +299,9 @@
         <div class="seg" data-seg="dict"><span class="o" data-v="off" data-i18n="Off">Off</span><span class="o" data-v="on" data-i18n="Microfono">Microphone</span></div></div>
       <div class="sect"><div class="slabel mono" style="margin-bottom:16px" data-i18n="Generazione">Generation</div>
         <div class="srow"><div><div class="rl">Denoising steps</div><div class="rh" data-i18n="16–64 · più alto = più nitido">16–64 · higher = sharper</div></div>
-          <div class="stepper" data-step="denoise"><span class="b l">−</span><span class="v mono">32</span><span class="b r">+</span></div></div>
+          <div class="stepper" data-step="denoise"><span class="b l">−</span><span class="v mono">48</span><span class="b r">+</span></div></div>
         <div class="srow"><div><div class="rl">Max tokens</div><div class="rh" data-i18n="tetto anti-troncamento">anti-truncation ceiling</div></div>
-          <div class="stepper" data-step="maxtok"><span class="b l">−</span><span class="v mono">8192</span><span class="b r">+</span></div></div>
+          <div class="stepper" data-step="maxtok"><span class="b l">−</span><span class="v mono">32768</span><span class="b r">+</span></div></div>
         <div style="margin-top:18px"><div class="rl" data-i18n="Mostra la diffusione">Show the diffusion</div><div class="rh" data-i18n="Vedi ogni blocco formarsi da segnaposto a testo. Un po' più lento.">Watch each block fill from placeholders to text. A bit slower.</div>
           <div class="seg" data-seg="reveal" style="margin-top:10px"><span class="o" data-v="off" data-i18n="Off">Off</span><span class="o" data-v="on" data-i18n="Attivo">On</span></div></div></div>
       <div class="sect"><div class="slabel mono" data-i18n="OCR per documenti scansionati">OCR for scanned documents</div>
@@ -312,7 +314,13 @@
       <div class="sect"><div class="slabel mono" data-i18n="Modello">Model</div>
         <div class="mrow"><select id="modelsel"></select><svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M6 9l6 6 6-6" stroke="var(--dim)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path></svg></div>
         <div class="advb"><div class="al mono" data-i18n="avanzato · HF id o cartella locale">advanced · HF id or local folder</div><input id="modelin" class="mono" placeholder="mlx-community/…  or  ~/Models/…"></div>
-        <div class="saverow"><button class="btn-accent" id="saveModel" data-i18n="Salva e carica">Save &amp; load</button><span class="note" id="saveNote" data-i18n="Ricarica a caldo senza chiudere la chat.">Hot-reloads without closing the chat.</span></div></div>
+        <div class="saverow"><button class="btn-accent" id="saveModel" data-i18n="Salva e carica">Save &amp; load</button><span class="note" id="saveNote" data-i18n="Ricarica a caldo senza chiudere la chat.">Hot-reloads without closing the chat.</span></div>
+        <!-- Aggiornamento modello: l'UNICO altro momento in cui l'app tocca la rete, e solo su
+             click esplicito. Nessun controllo automatico all'avvio: l'app resta offline di default. -->
+        <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--line)">
+          <div class="rh mono" id="modelRev" style="margin-bottom:9px"></div>
+          <div class="saverow"><button class="tbtn" id="btnCheckUpd" data-i18n="Cerca aggiornamenti">Check for updates</button><span class="note" id="updNote" data-i18n="Contatta HuggingFace solo ora, su tua richiesta.">Contacts HuggingFace only now, at your request.</span></div>
+        </div></div>
     </div>
   </div>
 </div>
@@ -330,11 +338,8 @@
   </div>
 </div>
 
-<!-- ===== UPDATE BANNER (dormant: appare solo se c'è un update locale) ===== -->
-<div class="toast hidden" id="updateBanner" style="border-color:var(--chip-live-border);bottom:auto;top:74px">
-  <span class="ok">↑</span><span><b data-i18n="Gephid 0.14 è pronto">Gephid 0.14 is ready</b> · <span style="color:var(--dim)" data-i18n="Si installa localmente · rilancia quando vuoi">Installs locally · relaunch when you like</span></span>
-  <button class="tbtn" id="doUpdate" style="margin-left:6px;padding:5px 10px" data-i18n="Aggiorna">Update</button>
-</div>
+<!-- annunci per VoiceOver (fine generazione ecc.), invisibile -->
+<div id="a11yLive" class="sr-only" aria-live="polite"></div>
 
 <!-- ===== DOWNLOAD OVERLAY (primo avvio) ===== -->
 <div class="ov err hidden" id="ovDownload">
@@ -381,7 +386,11 @@ window.__I18N__ = {
   "DiffusionGemma · 28 GB into memory":"DiffusionGemma · 28 GB in memoria","Couldn't start the model":"Non riesco ad avviare il modello",
   "Change the model in Settings":"Cambia il modello nelle Impostazioni","Backend unreachable":"Backend non raggiungibile","Reload":"Ricarica",
   "Getting Gephid ready":"Preparo Gephid","Pause":"Pausa","Resume":"Riprendi","Use a local folder":"Usa una cartella locale",
-  "Start a new chat?":"Iniziare una nuova chat?","Export first":"Esporta prima","Cancel":"Annulla","Update":"Aggiorna"
+  "Start a new chat?":"Iniziare una nuova chat?","Export first":"Esporta prima","Cancel":"Annulla","Update":"Aggiorna",
+  "Check for updates":"Cerca aggiornamenti","Contacts HuggingFace only now, at your request.":"Contatta HuggingFace solo ora, su tua richiesta.",
+  "Checking…":"Controllo…","Already up to date.":"Già aggiornato.","Applying…":"Applico…","Reloading the model…":"Ricarico il modello…",
+  "Updated and reloaded.":"Aggiornato e ricaricato.","Check failed":"Controllo fallito","Update failed":"Aggiornamento fallito",
+  "local revision":"revisione locale","weights unchanged · no re-download":"pesi invariati · nessun ri-download","file":"file","files":"file"
 };
 window.trStatus = function(it, lang){
   if(lang!=='en') return it;
@@ -408,7 +417,6 @@ function tr(en){ return (LANG==='it') ? (I18N[en]||en) : en; }
 function applyLang(lang){
   LANG=lang; localStorage.setItem('gephid-lang',lang); document.documentElement.lang=lang;
   document.querySelectorAll('[data-i18n]').forEach(n=>{ if(n._en===undefined)n._en=n.textContent; n.textContent=(lang==='it')?(n.getAttribute('data-i18n')||n._en):n._en; });
-  document.querySelectorAll('[data-i18n-html]').forEach(n=>{ if(n._en===undefined)n._en=n.innerHTML; n.innerHTML=(lang==='it')?(n.getAttribute('data-i18n-html')||n._en):n._en; });
   document.querySelectorAll('[data-i18n-ph]').forEach(n=>{ if(n._en===undefined)n._en=n.getAttribute('placeholder'); n.setAttribute('placeholder',(lang==='it')?(n.getAttribute('data-i18n-ph')||n._en):n._en); });
   try{ if(typeof history!=='undefined' && history.length===0 && typeof renderWelcome==='function' && document.querySelector('#log .turn')) renderWelcome(); }catch(e){}
 }
@@ -419,6 +427,10 @@ function applyTheme(t){ // system|light|dark
   const eff = t==='system' ? (matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light') : t;
   document.documentElement.setAttribute('data-theme',eff);
 }
+// tema "system": segue il cambio scuro/chiaro di macOS anche a runtime, senza ricaricare
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change',()=>{
+  if((localStorage.getItem('gephid-theme')||'system')==='system') applyTheme('system');
+});
 const TEXT_SIZES={s:'18px',m:'21px',l:'24px',xl:'28px'};
 function applyTextSize(v){ // s|m|l|xl -> regola SOLO il testo di lettura (--read-size)
   if(!TEXT_SIZES[v]) v='l';
@@ -429,8 +441,27 @@ function applyTextSize(v){ // s|m|l|xl -> regola SOLO il testo di lettura (--rea
 /* ============ helpers ============ */
 const $=s=>document.querySelector(s), el=(t,c)=>{const e=document.createElement(t);if(c)e.className=c;return e;};
 const GLYPHS='0123456789ABCDEF<>/\\#@%&*+=:· ';
+const REDUCED_MOTION=window.matchMedia&&matchMedia('(prefers-reduced-motion: reduce)').matches;
 function esc(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
-function scrollDown(){const s=$('#scroll');s.scrollTop=s.scrollHeight;}
+/* stick-to-bottom: durante lo streaming si auto-scrolla solo se sei già in fondo,
+   così puoi risalire a rileggere mentre genera (force=true per le azioni utente) */
+let stickBottom=true;
+$('#scroll').addEventListener('scroll',()=>{const s=$('#scroll');stickBottom=(s.scrollHeight-s.scrollTop-s.clientHeight)<90;});
+function scrollDown(force){ if(!force&&!stickBottom)return; const s=$('#scroll'); s.scrollTop=s.scrollHeight; }
+/* Anti-esfiltrazione: l'output del modello è untrusted (prompt injection nei documenti allegati).
+   Nel markdown reso niente risorse né link esterni — src/href restano locali (in aggiunta alla CSP). */
+if(window.DOMPurify){DOMPurify.addHook('afterSanitizeAttributes',function(n){
+  if(n.hasAttribute('src')&&!/^(\/|data:image\/)/.test(n.getAttribute('src')||''))n.removeAttribute('src');
+  if(n.hasAttribute('srcset'))n.removeAttribute('srcset');
+  if(n.hasAttribute('href')){const h=n.getAttribute('href')||'';if(!/^(#|\/(?!\/))/.test(h)){n.setAttribute('data-blocked-href',h);n.removeAttribute('href');}}
+});}
+/* Un link esterno cliccato navigherebbe la WKWebView fuori dall'app (senza "indietro"): blocca. */
+document.addEventListener('click',function(e){const a=e.target.closest&&e.target.closest('a');if(!a)return;
+  const h=a.getAttribute('href')||a.getAttribute('data-blocked-href')||'';
+  if(/^(#|\/(?!\/))/.test(h))return;
+  e.preventDefault();e.stopPropagation();
+  if(h)toast((LANG==='it'?'Link esterno bloccato (Gephid è offline): ':'External link blocked (Gephid is offline): ')+h.slice(0,90),true);
+},true);
 async function copyText(s){ try{ if(navigator.clipboard){ await navigator.clipboard.writeText(s); return true; } }catch(e){}
   try{ const t=el('textarea'); t.value=s; t.style.cssText='position:fixed;opacity:0;top:0'; document.body.appendChild(t); t.select(); document.execCommand('copy'); t.remove(); return true; }catch(e){ return false; } }
 
@@ -445,18 +476,26 @@ async function copyText(s){ try{ if(navigator.clipboard){ await navigator.clipbo
   const g=$('#ovGrid'); if(g) cells.forEach(c=>{const s=el('span');s.style.background=c[0];s.style.animationDelay=c[1]+'s';g.appendChild(s);});
   // percentuale di "materializzazione": il load del modello non espone un progresso reale,
   // quindi sale in modo asintotico verso ~96% e si ferma quando l'overlay sparisce (model_ok)
-  let pct=0; const pe=$('#ovPct');
+  let pct=0; const pe=$('#ovPct'); let ticking=false;
   window.__matComplete=()=>{ pct=100; if(pe) pe.textContent='100'; };
-  (function tick(){
-    const ov=$('#ovStartup');
-    if(!ov || ov.classList.contains('hidden')) return;
-    if(pct<96) pct += Math.max(0.5,(96-pct)*0.045);
-    if(pe) pe.textContent=Math.floor(pct);
-    setTimeout(tick,200);
-  })();
+  function tickLoop(){
+    if(ticking) return; ticking=true;
+    (function tick(){
+      const ov=$('#ovStartup');
+      if(!ov || ov.classList.contains('hidden')){ ticking=false; return; }
+      if(pct<96) pct += Math.max(0.5,(96-pct)*0.045);
+      if(pe) pe.textContent=Math.floor(pct);
+      setTimeout(tick,200);
+    })();
+  }
+  tickLoop();
+  // dopo il download del modello l'overlay ricompare: riparte anche l'animazione (ticker + scramble)
+  window.__matRestart=()=>{ pct=0; tickLoop();
+    document.querySelectorAll('#ovStartup [data-scramble]').forEach(n=>{ if(n._t)clearTimeout(n._t); scramble(n); }); };
 })();
 function scramble(node){
   const full=node.getAttribute('data-scramble'); const total=full.length; const ov=node.closest('.ov');
+  if(REDUCED_MOTION){ node.textContent=full; return; }  // niente animazioni con prefers-reduced-motion
   const dead=()=>ov&&ov.classList.contains('hidden');  // overlay chiuso -> stop (niente timer a vuoto)
   function run(){ if(dead())return; let frame=0;const iv=setInterval(()=>{ if(dead()){clearInterval(iv);return;} frame++;const res=Math.floor(frame*0.9);let out='';for(let i=0;i<total;i++){if(full[i]===' '){out+=' ';continue;}out+=i<res?full[i]:GLYPHS[(Math.random()*(GLYPHS.length-1))|0];}node.textContent=out;if(res>=total){clearInterval(iv);node._t=setTimeout(run,2800);}},48);}
   run();
@@ -466,7 +505,9 @@ document.querySelectorAll('[data-scramble]').forEach(scramble);
 /* ============ chat state ============ */
 let chatId = (crypto.randomUUID?crypto.randomUUID():'c'+Date.now());
 let history=[]; let attachments=[]; let busy=false; let aborter=null;
-let curSteps=32, curMaxTok=8192, curOcr='local', curModel='DiffusionGemma';
+// allineati ai DEFAULTS del backend (48 step / 32768 token): se /api/config non risponde la UI
+// non deve generare con parametri diversi da quelli documentati e salvati nel config.
+let curSteps=48, curMaxTok=32768, curOcr='local', curModel='DiffusionGemma';
 const WELCOME_EN="Hi! I'm <strong>Gephid</strong>. I run 100% on your Mac, offline. Attach a document or just type anything.";
 const WELCOME_IT="Ciao! Sono <strong>Gephid</strong>. Giro al 100% sul tuo Mac, offline. Allega un documento o scrivimi quello che vuoi.";
 
@@ -500,20 +541,31 @@ function restoreChat(){
   scrollDown(); return true;
 }
 
+/* marked tratta \( \) \[ \] come escape markdown e ne emette solo ( ) [ ]: i delimitatori LaTeX
+   in quella notazione — che il modello usa spessissimo, spesso più dei dollari — non arrivavano MAI
+   a KaTeX e la formula restava testo rotto. Raddoppiando il backslash, marked ne emette uno
+   letterale e auto-render la riconosce. Dentro il codice (fence ``` e span `…`) non si tocca nulla:
+   lì un \( è codice, non una formula (e un fence non chiuso vale fino a fine testo: in streaming
+   il blocco arriva a pezzi). */
+function mathEscape(src){
+  if(!src||src.indexOf('\\')<0) return src;
+  return String(src).split(/(```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)|`[^`\n]*`)/g)
+    .map((seg,i)=>i%2?seg:seg.replace(/\\([[\]()])/g,'\\\\$1')).join('');
+}
 /* markdown via marked/DOMPurify if present, else plain text (fail-safe, offline) */
 function renderMd(node,text){
   if(window.marked&&window.DOMPurify){
-    node.innerHTML=DOMPurify.sanitize(marked.parse(text));
+    node.innerHTML=DOMPurify.sanitize(marked.parse(mathEscape(text)));
     if(window.renderMathInElement){ try{ renderMathInElement(node,{delimiters:[{left:'$$',right:'$$',display:true},{left:'\\[',right:'\\]',display:true},{left:'$',right:'$',display:false},{left:'\\(',right:'\\)',display:false}],throwOnError:false,ignoredTags:['script','noscript','style','textarea','pre','code']}); }catch(e){} }
   } else { node.textContent=text; }
 }
 // markdown LIVE durante lo streaming: reso subito (come prima del redesign), senza KaTeX (le formule a fine)
-function renderMdLive(node,text){ if(window.marked&&window.DOMPurify){ node.innerHTML=DOMPurify.sanitize(marked.parse(text)); } else { node.textContent=text; } }
+function renderMdLive(node,text){ if(window.marked&&window.DOMPurify){ node.innerHTML=DOMPurify.sanitize(marked.parse(mathEscape(text))); } else { node.textContent=text; } }
 // "formazione dal rumore": il draft del blocco corrente = token già rivelati + [Mask] ancora da rivelare.
 // I [Mask] diventano pillole-skeleton che luccicano; man mano che il denoising procede, si trasformano in testo.
 function skeletonFrag(draftText){
   const wrap=el('span','dfrag');
-  const clean=(draftText||'').replace(/\\n/g,' ').replace(/\\r/g,'')
+  const clean=(draftText||'').replace(/\n/g,' ').replace(/\r/g,'')
     .replace(/<(bos|eos|pad|unk|mask|s|\/s|start_of_turn|end_of_turn|unused\d*)>/gi,'')  // token speciali trapelati nel draft
     .replace(/^\s*[-*]\s+/,'').replace(/[*_`#>]/g,'')  // marcatori markdown grezzi: durante la formazione si leggono parole pulite, non markup
     .replace(/ {2,}/g,' ');
@@ -531,6 +583,7 @@ function setBusy(on){
   if(on){ sb.innerHTML='<svg width="15" height="15" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2.5" fill="#fff"></rect></svg>'; sb.title='Stop'; }
   else { sb.innerHTML='<svg width="15" height="15" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7" stroke="#fff" fill="none" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"></path></svg>'; sb.title='Send'; }
   const nb=$('#btnNew'); if(nb){ nb.style.opacity=on?'.45':''; nb.style.cursor=on?'not-allowed':''; }  // Nuova chat bloccata durante lo stream
+  if(!on) updateSend();  // a fine generazione il bottone riflette lo stato reale (input vuoto -> disabilitato)
 }
 function buildSeg(barEl){ barEl.innerHTML=''; for(let i=0;i<32;i++)barEl.appendChild(el('span')); }
 function paintSeg(barEl,filled){
@@ -538,10 +591,6 @@ function paintSeg(barEl,filled){
   const off = theme==='light'?'#dbe2ee':'#1c2840';
   for(let i=0;i<segs.length;i++){ segs[i].style.background=(i<filled)?'#4169E1':off; segs[i].style.boxShadow=(i<filled&&i>=filled-2)?'0 0 6px rgba(65,105,225,.65)':'none'; }
 }
-function frontier(text){ // scramble last 5 chars stylization on a live block
-  return text;
-}
-
 let genStopped=false;
 async function send(){
   if(busy){ genStopped=true; if(aborter)aborter.abort(); return; }
@@ -554,22 +603,27 @@ async function send(){
     else if(cmd==='export') toggleExport();
     else if(cmd==='compact') compactChat();
     return; }
-  if(attachments.some(a=>!a.id)) return; // wait for ingest
+  if(attachments.some(a=>a.loading)) return; // ingest in corso: aspetta (i chip in ERRORE invece non bloccano)
   const atts=attachments.filter(a=>a.id);
   if(!txt && !atts.length) return;
   busy=true;  // guard anti doppio-invio: alza busy SUBITO (prima di qualunque await)
   if(recording) stopDict();  // ferma la dettatura: altrimenti il timer ri-riempie l'input col testo dettato
-  // user turn
-  const ub=addTurn('user'); const um=el('div','msg'); um.textContent=txt||tr('(see attachments)'); ub.appendChild(um);
+  stickBottom=true;  // l'invio riporta sempre in fondo
+  // user turn (stesso testo mostrato e in cronologia: niente divergenza IT/EN)
+  const phTxt=txt||tr('(see attachments)');
+  const ub=addTurn('user'); const um=el('div','msg'); um.textContent=phTxt; ub.appendChild(um);
   if(atts.length){ atts.forEach(a=>{ const c=el('div','att mono'); c.innerHTML='<svg width="13" height="13" viewBox="0 0 24 24"><path d="M14 4v5h5" stroke-width="2" stroke-linejoin="round"></path><path d="M14 4H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9z" stroke-width="2" stroke-linejoin="round"></path></svg>'+esc(a.name)+' <span style="color:var(--dim2)">·</span> ✓ '+(a.tokens||0)+' tok'; ub.appendChild(c); }); }
-  history.push({role:'user',content:txt||'(allegato)'}); saveChat();  // salva subito: il messaggio non si perde anche se la generazione fallisce
+  history.push({role:'user',content:phTxt}); saveChat();  // salva subito: il messaggio non si perde anche se la generazione fallisce
   $('#ta').value=''; $('#ta').style.height='auto';
   const attachIds=atts.map(a=>a.id); attachments=[]; renderChips();
-  await generate({attach:attachIds});
+  // finally: busy viene alzato QUI (guard anti doppio-invio) ma abbassato dentro generate(). Se
+  // generate() esplodesse dopo, la UI resterebbe bloccata per sempre senza modo di sbloccarla.
+  try{ await generate({attach:attachIds}); }
+  finally{ if(busy) setBusy(false); }
 }
 let genAttach=[];
 
-const META_COPY='<span class="act" data-k="copy"><svg width="13" height="13" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2" stroke-width="2"></rect><path d="M5 15V5a2 2 0 0 1 2-2h10" stroke-width="2" stroke-linecap="round"></path></svg>'+'__COPY__</span><span class="act" data-k="dl"><svg width="13" height="13" viewBox="0 0 24 24"><path d="M12 4v11m0 0 4-4m-4 4-4-4M5 20h14" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path></svg>__DL__</span>';
+const META_COPY='<span class="act" data-k="copy" role="button" tabindex="0"><svg width="13" height="13" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2" stroke-width="2"></rect><path d="M5 15V5a2 2 0 0 1 2-2h10" stroke-width="2" stroke-linecap="round"></path></svg>'+'__COPY__</span><span class="act" data-k="dl" role="button" tabindex="0"><svg width="13" height="13" viewBox="0 0 24 24"><path d="M12 4v11m0 0 4-4m-4 4-4-4M5 20h14" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path></svg>__DL__</span>';
 async function generate(opts){
   opts=opts||{}; genStopped=false;
   const sb = opts.turn || addTurn('stream'); sb.classList.add('stream');
@@ -577,7 +631,7 @@ async function generate(opts){
   const bar=el('div','dn-bar'); buildSeg(bar);
   const body= opts.body || el('div','stream-txt');
   const foot=el('div','meta mono'); foot.innerHTML='<button class="stop"><span class="sq"></span>Stop</button><span class="tps"><span class="toks">0</span> tok/s · '+curSteps+' step</span>';
-  if(opts.body){ sb.insertBefore(head,body); sb.insertBefore(bar,body); sb.appendChild(foot); body.className='stream-txt'; }
+  if(opts.body){ sb.insertBefore(head,body); sb.insertBefore(bar,body); sb.appendChild(foot); }
   else { sb.appendChild(head); sb.appendChild(bar); sb.appendChild(body); sb.appendChild(foot); }
   foot.querySelector('.stop').onclick=()=>{ genStopped=true; if(aborter)aborter.abort(); };
   body.className='stream-txt msg';  // così il markdown live ha i margini compatti di .msg
@@ -590,7 +644,7 @@ async function generate(opts){
   const paintBar=f=>{ if(f!==lastFilled){ lastFilled=f; paintSeg(bar,f); } };
   // il timer dei secondi NON sovrascrive un messaggio di stato per ~1.7s (così "comprimo…" resta leggibile)
   const setSecs=()=>{ if(Date.now()>statusHold) eSecs.textContent=((Date.now()-t0)/1000).toFixed(0)+'s'; };
-  const liveTps=()=>{ const sec=(Date.now()-t0)/1000; if(sec>0.6) eToks.textContent=Math.round((acc.length/4)/sec); };  // stima token≈char/4
+  const liveTps=()=>{ const sec=(Date.now()-t0)/1000; if(sec>0.6) eToks.textContent=Math.round(((acc.length-base.length)/4)/sec); };  // stima token≈char/4, solo sul testo generato ORA (in Continue acc include il parziale precedente)
   // render: testo consolidato (markdown) + blocco corrente che si forma (skeleton + token rivelati)
   // throttle ADATTIVO: renderMdLive riparsa tutto l'acc -> O(n) per paint; su risposte lunghe dirado per evitare O(n^2)
   const paintStream=(force)=>{ const n=Date.now(); const gap=acc.length>4000?280:(acc.length>1500?150:70);
@@ -647,15 +701,16 @@ async function generate(opts){
     const f=el('div','meta mono');
     f.innerHTML='<span style="color:var(--dim)">'+(LANG==='it'?'Interrotto':'Stopped')+' · '+lastStep+'/'+lastTot+' '+(LANG==='it'?'step':'steps')+'</span><button class="stop reg" style="margin-left:14px">'+tr('Regenerate')+'</button><button class="stop cont">'+tr('Continue')+'</button>';
     sb.appendChild(f);
-    f.querySelector('.reg').onclick=()=>{ if(busy)return; busy=true; history.pop(); sb.remove(); generate({}); };  // Regenerate: scarta il parziale, riparte da zero
+    f.querySelector('.reg').onclick=()=>{ if(busy)return; busy=true; history.pop(); saveChat(); sb.remove(); generate({}); };  // Regenerate: scarta il parziale (anche dal localStorage), riparte da zero
     f.querySelector('.cont').onclick=()=>{ if(busy)return; busy=true; f.remove(); generate({turn:sb, body:body, cont:true}); };  // Continue: tiene il parziale, il backend lo prosegue
     scrollDown(); return;
   }
   const done=el('div','meta mono');
-  // tps autoritativo del backend (token/sec veri); fallback a stima token≈char/4
-  const tps=finalTps?Math.round(finalTps):Math.round((acc.length/4)/Math.max(1,(Date.now()-t0)/1000));
+  // tps autoritativo del backend (token/sec veri); fallback a stima token≈char/4 sul solo testo generato ora
+  const tps=finalTps?Math.round(finalTps):Math.round(((acc.length-base.length)/4)/Math.max(1,(Date.now()-t0)/1000));
   done.innerHTML=META_COPY.replace('__COPY__',tr('Copy')).replace('__DL__',tr('Download'))+'<span class="tps">'+tps+' tok/s · '+curSteps+' step</span>';
   sb.appendChild(done); scrollDown();
+  const live=$('#a11yLive'); if(live) live.textContent=(LANG==='it'?'Risposta completata':'Response complete');  // VoiceOver: annuncia la fine
 }
 
 async function streamNDJSON(url,bodyObj,onObj,signal){
@@ -664,19 +719,20 @@ async function streamNDJSON(url,bodyObj,onObj,signal){
   const rd=r.body.getReader(), dec=new TextDecoder(); let buf='';
   while(true){ const {done,value}=await rd.read(); if(done)break; buf+=dec.decode(value,{stream:true});
     let nl; while((nl=buf.indexOf('\n'))>=0){ const line=buf.slice(0,nl); buf=buf.slice(nl+1); if(line.trim()){ try{ onObj(JSON.parse(line)); }catch(e){} } } }
+  buf+=dec.decode();  // flush finale + eventuale ultima riga senza \n
+  if(buf.trim()){ try{ onObj(JSON.parse(buf)); }catch(e){} }
 }
 
 /* ============ wiring ============ */
 $('#btnSend').onclick=send;
 $('#ta').addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); send(); } });
-$('#ta').addEventListener('input',function(){ this.style.height='auto'; this.style.height=Math.min(120,this.scrollHeight)+'px'; });
+$('#ta').addEventListener('input',function(){ this.style.height='auto'; this.style.height=Math.min(150,this.scrollHeight)+'px'; });  // 150 = max-height CSS della .ta
 function newChat(){ history=[]; attachments=[]; genAttach=[]; $('#chiprow').innerHTML=''; chatId=(crypto.randomUUID?crypto.randomUUID():'c'+Date.now()); saveChat(); renderWelcome(); updateSend(); }
-$('#btnNew').onclick=()=>{ if(busy)return; if(history.length>0) $('#confirm').classList.remove('hidden'); else newChat(); };
+$('#btnNew').onclick=()=>{ if(busy)return; if(history.length>0){ $('#confirm').classList.remove('hidden'); const c=$('#cfCancel'); if(c)c.focus(); } else newChat(); };
 $('#cfCancel').onclick=()=>$('#confirm').classList.add('hidden');
 $('#confirm').addEventListener('click',e=>{ if(e.target===$('#confirm'))$('#confirm').classList.add('hidden'); });
 $('#cfNew').onclick=()=>{ $('#confirm').classList.add('hidden'); newChat(); };
 $('#cfExport').onclick=()=>{ $('#confirm').classList.add('hidden'); toggleExport(); };
-$('#doUpdate').onclick=()=>location.reload();
 
 /* ---- attachments (real ingest) ---- */
 function fmtTok(n){ return n>=1000?(n/1000).toFixed(1).replace(/\.0$/,'')+'k':String(n); }
@@ -692,16 +748,25 @@ function renderChips(){ const c=$('#chiprow'); c.innerHTML='';
       const iv=setInterval(()=>{ if(!t.isConnected||!a.loading){clearInterval(iv);return;} upd(); },1000); ch.appendChild(t); }
     else if(a.err){ const t=el('span'); t.textContent='· '+a.err; ch.appendChild(t); }
     else { const s=el('span','sep2'); s.textContent='·'; ch.appendChild(s); const tk=el('span','tk'); tk.textContent=fmtTok(a.tokens||0)+' tok'; ch.appendChild(tk); }
-    const x=el('span','x'); x.textContent='✕'; x.onclick=()=>{ if(a.ctrl)try{a.ctrl.abort();}catch(e){} attachments=attachments.filter(z=>z!==a); renderChips(); }; ch.appendChild(x);
+    const x=el('span','x'); x.textContent='✕'; x.setAttribute('role','button'); x.setAttribute('tabindex','0'); x.setAttribute('aria-label',a.loading?'Cancel reading':'Remove attachment');
+    x.onclick=()=>{ if(a.loading){ if(a.ctrl)try{a.ctrl.abort();}catch(e){}
+      if(a.token)fetch('/api/ingest/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:a.token})}).catch(()=>{}); }  // ferma anche l'OCR lato server
+      attachments=attachments.filter(z=>z!==a); renderChips(); }; ch.appendChild(x);
     c.appendChild(ch); });
   updateSend();
 }
-async function ingestOne(body,name){ const a={id:null,name:name,tokens:0,loading:true,t0:Date.now(),ctrl:null};
+async function ingestOne(body,name){ const a={id:null,name:name,tokens:0,loading:true,t0:Date.now(),ctrl:null,
+    token:(crypto.randomUUID?crypto.randomUUID():'t'+Date.now()+Math.round(Math.random()*1e9))};
   try{a.ctrl=new AbortController();}catch(e){}
+  body.cancel_token=a.token;
   attachments.push(a); renderChips();
   try{ const r=await(await fetch('/api/ingest',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),signal:a.ctrl&&a.ctrl.signal})).json();
-    if(r.error){ a.loading=false; a.err=r.error.slice(0,70); } else { a.loading=false; a.id=r.id; a.kind=r.kind; a.tokens=r.tokens||0; a.ready=true; }
-  }catch(e){ attachments=attachments.filter(z=>z!==a); }
+    if(r.error){ a.loading=false; a.err=r.error.slice(0,70); } else { a.loading=false; a.id=r.id; a.kind=r.kind; a.tokens=r.tokens||0; a.ready=true;
+      if(r.scanned_pages)toast((LANG==='it'?'OCR su ':'OCR on ')+r.ocr_pages+' / '+r.scanned_pages+(LANG==='it'?' pagine scansionate':' scanned pages'),true); }  // taglio dichiarato, mai silenzioso
+  }catch(e){
+    if(e&&e.name==='AbortError'){ attachments=attachments.filter(z=>z!==a); }  // annullato dall'utente: via il chip
+    else { a.loading=false; a.err=(LANG==='it'?'backend non raggiungibile':'backend unreachable'); }  // errore vero: chip in rosso, non sparire in silenzio
+  }
   renderChips();
 }
 $('#btnAttach').onclick=async()=>{
@@ -710,10 +775,12 @@ $('#btnAttach').onclick=async()=>{
 };
 async function ingestFileObj(f){ const b64=await new Promise(res=>{const r=new FileReader();r.onload=()=>res(String(r.result).split(',')[1]);r.readAsDataURL(f);}); ingestOne({filename:f.name,content:b64},f.name); }
 $('#fileinput').onchange=async e=>{ const files=[...e.target.files]; e.target.value=''; for(const f of files) await ingestFileObj(f); };
-/* drag & drop allegati (evidenzia la command bar, ingest al drop) */
-['dragenter','dragover'].forEach(ev=>document.addEventListener(ev,e=>{ if(e.dataTransfer&&Array.from(e.dataTransfer.types||[]).includes('Files')){ e.preventDefault(); $('#cmd').style.borderColor='var(--accent)'; $('#cmd').style.background='var(--chip-live-bg)'; } }));
+/* drag & drop allegati (evidenzia la command bar, ingest al drop).
+   preventDefault SEMPRE: un drop non gestito (testo/URL) farebbe navigare la WKWebView via dalla UI. */
+['dragenter','dragover'].forEach(ev=>document.addEventListener(ev,e=>{ e.preventDefault(); if(e.dataTransfer&&Array.from(e.dataTransfer.types||[]).includes('Files')){ $('#cmd').style.borderColor='var(--accent)'; $('#cmd').style.background='var(--chip-live-bg)'; } }));
 ['dragleave','dragend'].forEach(ev=>document.addEventListener(ev,e=>{ if(e.relatedTarget===null){ $('#cmd').style.borderColor=''; $('#cmd').style.background=''; } }));
-document.addEventListener('drop',async e=>{ if(!e.dataTransfer||!e.dataTransfer.files.length)return; e.preventDefault(); $('#cmd').style.borderColor=''; $('#cmd').style.background=''; for(const f of [...e.dataTransfer.files]) await ingestFileObj(f); });
+document.addEventListener('drop',async e=>{ e.preventDefault(); $('#cmd').style.borderColor=''; $('#cmd').style.background='';
+  if(!e.dataTransfer||!e.dataTransfer.files.length)return; for(const f of [...e.dataTransfer.files]) await ingestFileObj(f); });
 $('#ta').addEventListener('input',updateSend);
 
 /* ---- dictation (Go binds) ---- */
@@ -742,7 +809,7 @@ $('#btnMic').onclick=async()=>{
     toast(t,true); return; }
   recording=true; recStart=Date.now(); dictBase=$('#ta').value?($('#ta').value.replace(/\s*$/,'')+' '):'';
   $('#btnMic').classList.add('rec'); $('#recline').classList.remove('hidden');
-  dictTimer=setInterval(async()=>{ const t=window.gephidDictText?(await gephidDictText()):''; if(!recording) return; /* fermata durante l'await: non ri-riempire l'input */ _dictSet=true; $('#ta').value=dictBase+(t||''); _dictSet=false; $('#ta').style.height='auto'; $('#ta').style.height=Math.min(120,$('#ta').scrollHeight)+'px'; const s=Math.floor((Date.now()-recStart)/1000); $('#recTime').textContent=Math.floor(s/60)+':'+String(s%60).padStart(2,'0'); updateSend(); },300);
+  dictTimer=setInterval(async()=>{ const t=window.gephidDictText?(await gephidDictText()):''; if(!recording) return; /* fermata durante l'await: non ri-riempire l'input */ _dictSet=true; $('#ta').value=dictBase+(t||''); _dictSet=false; $('#ta').style.height='auto'; $('#ta').style.height=Math.min(150,$('#ta').scrollHeight)+'px'; const s=Math.floor((Date.now()-recStart)/1000); $('#recTime').textContent=Math.floor(s/60)+':'+String(s%60).padStart(2,'0'); updateSend(); },300);
 };
 function stopDict(){ recording=false; clearInterval(dictTimer); if(window.gephidDictStop)gephidDictStop(); $('#btnMic').classList.remove('rec'); $('#recline').classList.add('hidden'); }
 // edit manuale durante la dettatura -> riparte da quella base (scarta la trascrizione precedente)
@@ -751,7 +818,9 @@ $('#ta').addEventListener('input',()=>{ if(recording && !_dictSet){ dictBase=$('
 
 /* ---- per-message copy/download (delegation) ---- */
 $('#log').addEventListener('click',e=>{ const act=e.target.closest('.act'); if(!act)return;
-  const turn=act.closest('.turn'); const body=turn&&turn.querySelector('.msg'); const txt=body?body.textContent:'';
+  const turn=act.closest('.turn'); const body=turn&&turn.querySelector('.msg');
+  // sorgente markdown grezza (dataset.src) quando c'è: il textContent del DOM reso duplica le formule KaTeX
+  const txt=body?(body.dataset.src||body.textContent):'';
   if(act.dataset.k==='copy'){ copyText(txt).then(ok=>{ if(ok)toast(tr('Copied')); }); }
   else if(act.dataset.k==='dl'){ const name='gephid-'+Date.now()+'.md'; fetch('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:name,content:txt})}).then(r=>r.json()).then(r=>{if(r.ok)toast(tr('Saved to')+' ~/Downloads');}); }
 });
@@ -765,30 +834,38 @@ function pollHealth(){
     try{ const h=await (await fetch('/api/health')).json();
       if(g!==healthGen) return;
       healthFails=0; if(h.model) curModel=h.model; $('#ovBackend').classList.add('hidden');  // risposta ricevuta: backend di nuovo raggiungibile
-      if(h.model_err){ showOverlayErr('load-error',h); return; }
+      if(h.model_ok){ loadErrDismissed=false; if(window.__matComplete)__matComplete(); ['#ovStartup','#ovDownload','#ovLoadErr'].forEach(s=>$(s).classList.add('hidden')); setTimeout(tick,4000); return; }  // heartbeat continuo: rileva quando il backend torna su e fa sparire l'overlay
+      if(h.model_err){ showOverlayErr('load-error',h); setTimeout(tick,2500); return; }  // il poll NON muore: se l'utente ripara il modello (Salva e carica) l'overlay sparisce da solo
       if(h.needs_download){ showDownload(); return; }
-      if(h.model_ok){ if(window.__matComplete)__matComplete(); ['#ovStartup','#ovDownload','#ovLoadErr'].forEach(s=>$(s).classList.add('hidden')); setTimeout(tick,4000); return; }  // heartbeat continuo: rileva quando il backend torna su e fa sparire l'overlay
       setTimeout(tick,600);
     }catch(e){ if(g!==healthGen) return; healthFails++; if(healthFails>=5){ showOverlayErr('backend-unreachable'); } setTimeout(tick, healthFails>3?2000:600); }
   })();
 }
-let dlActive=false;
+let dlActive=false, loadErrDismissed=false;
 function showDownload(){ if(dlActive)return; dlActive=true; $('#ovStartup').classList.add('hidden'); $('#ovDownload').classList.remove('hidden'); runDownload(); }
+function dlFailed(msg){  // errore di download: NON lasciare l'overlay bloccato — bottone "Riprova" + stato pulito
+  dlActive=false; $('#dlPause').textContent=tr('Retry');
+  $('#dlStat').textContent='⚠ '+(msg||(LANG==='it'?'download interrotto':'download interrupted'));
+}
 async function runDownload(){
   try{ await streamNDJSON('/api/download',{},function(o){
     if(o.pct!==undefined){ $('#dlFill').style.width=o.pct+'%'; $('#dlStat').textContent=o.gotGB+' / '+o.totalGB+' GB · '+o.pct+'% · '+o.speed+' MB/s'; }
-    else if(o.downloaded){ dlActive=false; $('#ovDownload').classList.add('hidden'); $('#ovStartup').classList.remove('hidden'); pollHealth(); }
+    else if(o.downloaded){ dlActive=false; $('#ovDownload').classList.add('hidden'); $('#ovStartup').classList.remove('hidden'); if(window.__matRestart)__matRestart(); pollHealth(); }
     else if(o.paused){ dlActive=false; $('#dlPause').textContent=tr('Resume'); $('#dlStat').textContent=(o.gotGB||0)+' GB · '+(LANG==='it'?'in pausa':'paused'); }
-    else if(o.error){ $('#dlStat').textContent='⚠ '+o.error; }
-  }); }catch(e){ dlActive=false; }
+    else if(o.error){ dlFailed(o.error); }
+  }); }catch(e){ dlFailed(); }
 }
-$('#dlPause').onclick=()=>{ if($('#dlPause').textContent===tr('Resume')){ $('#dlPause').textContent=tr('Pause'); showDownload(); } else { fetch('/api/download/pause',{method:'POST'}); } };
+$('#dlPause').onclick=()=>{ const t=$('#dlPause').textContent;
+  if(t===tr('Resume')||t===tr('Retry')){ $('#dlPause').textContent=tr('Pause'); showDownload(); }  // riprende/ritenta (huggingface_hub riparte dai byte già scaricati)
+  else { fetch('/api/download/pause',{method:'POST'}); } };
 function showOverlayErr(kind,h){
-  $('#ovStartup').classList.add('hidden');
-  if(kind==='load-error'){ if(h&&h.model_err)$('#loadErrDetail').textContent=h.model_err.slice(0,80); $('#ovLoadErr').classList.remove('hidden'); }
-  else { $('#ovBackend').classList.remove('hidden'); }
+  if(kind==='load-error'){
+    if(loadErrDismissed) return;  // l'utente l'ha chiuso per andare nelle Impostazioni: non riproporlo a ogni poll
+    $('#ovStartup').classList.add('hidden');
+    if(h&&h.model_err)$('#loadErrDetail').textContent=h.model_err.slice(0,80); $('#ovLoadErr').classList.remove('hidden');
+  } else { $('#ovStartup').classList.add('hidden'); $('#ovBackend').classList.remove('hidden'); }
 }
-$('#loadErrSettings').onclick=()=>{ $('#ovLoadErr').classList.add('hidden'); openSettings(); };
+$('#loadErrSettings').onclick=()=>{ loadErrDismissed=true; $('#ovLoadErr').classList.add('hidden'); openSettings(); };
 $('#backendReload').onclick=async()=>{  // ricarica solo se il backend risponde; se è ancora giù rilancio l'heartbeat (niente pagina bianca)
   try{ await fetch('/api/health',{cache:'no-store'}); location.reload(); return; }catch(e){}
   healthFails=0; pollHealth();  // ancora giù: l'overlay sparirà da solo appena il backend (riavviato dal launcher) torna su
@@ -806,7 +883,9 @@ function syncSettings(){
   document.querySelector('[data-step="maxtok"] .v').textContent=curMaxTok;
 }
 function setSeg(seg,v){ document.querySelectorAll('[data-seg="'+seg+'"] .o').forEach(o=>o.classList.toggle('on',o.getAttribute('data-v')===v)); }
-function openSettings(){ syncSettings(); loadModels(); $('#settings').classList.remove('hidden'); }
+function openSettings(){ syncSettings(); loadModels(); loadConfig();  // loadConfig: rinfresca anche la revisione mostrata
+  if(typeof updIdle==='function'){ updIdle(); const n=$('#updNote'); if(n){ n.style.color=''; n.textContent=tr('Contacts HuggingFace only now, at your request.'); } }  // niente "Aggiorna (17 KB)" stantio da una sessione precedente
+  $('#settings').classList.remove('hidden'); const c=$('#setClose'); if(c)c.focus(); }
 $('#btnSettings').onclick=openSettings;
 $('#setClose').onclick=()=>$('#settings').classList.add('hidden');
 $('#settings').addEventListener('click',e=>{ if(e.target===$('#settings'))$('#settings').classList.add('hidden'); });
@@ -830,15 +909,64 @@ async function postConfig(obj){ try{ await fetch('/api/config',{method:'POST',he
 async function loadModels(){ try{ const d=await(await fetch('/api/models')).json(); const s=$('#modelsel'); s.innerHTML='';
   (d.models||[]).forEach(m=>{ const o=el('option'); o.value=m.id; o.textContent=m.label||m.id; if(m.id===d.current)o.selected=true; s.appendChild(o); });
   $('#modelin').value=d.current||''; s.onchange=()=>$('#modelin').value=s.value; }catch(e){} }
-$('#saveModel').onclick=async()=>{ const m=$('#modelin').value.trim(); if(!m)return; const n=$('#saveNote');
-  try{ await streamNDJSON('/api/reload',{model:m},o=>{ if(o.status)n.textContent=o.status; if(o.error)n.textContent=o.error; if(o.done)n.textContent=tr('Model loaded and ready.'); }); }catch(e){ n.textContent=String(e); } };
+/* ---- aggiornamento del modello (esplicito: solo su click) ----
+   La cache di HuggingFace indirizza i file per hash, quindi un aggiornamento scarica SOLO i file
+   davvero cambiati: aggiornare il solo chat_template costa KB, non i 28GB del modello. Mostriamo
+   il delta reale prima di scaricare, così l'utente sa sempre cosa sta per succedere. */
+function fmtBytes(n){ return n>=1e9?(n/1e9).toFixed(2)+' GB':n>=1e6?(n/1e6).toFixed(1)+' MB':Math.max(1,Math.round(n/1e3))+' KB'; }
+function showRev(rev){ const e=$('#modelRev'); if(!e)return;
+  e.textContent = rev ? (tr('local revision')+' '+String(rev).slice(0,8)) : ''; }
+// stato invece di riassegnare onclick: null = "cerca", oggetto = "applica quell'aggiornamento"
+// (scambiare l'handler lasciava il pulsante morto dopo il primo aggiornamento)
+let updPending=null;
+function updIdle(){ updPending=null; const b=$('#btnCheckUpd'); b.classList.remove('on'); b.textContent=tr('Check for updates'); b.disabled=false; }
+async function checkUpdate(){
+  const b=$('#btnCheckUpd'), n=$('#updNote');
+  b.disabled=true; n.textContent=tr('Checking…'); n.style.color='';
+  let d=null;
+  try{ d=await(await fetch('/api/model/check',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json(); }
+  catch(e){ n.textContent=tr('Check failed')+': '+e; n.style.color='var(--danger)'; updIdle(); return; }
+  if(d.supported===false){ n.textContent=d.reason||''; updIdle(); return; }
+  if(d.error){ n.textContent=tr('Check failed')+': '+String(d.error).slice(0,110); n.style.color='var(--danger)'; updIdle(); return; }
+  showRev(d.current);
+  if(d.up_to_date||!d.n_files){ n.textContent=tr('Already up to date.'); updIdle(); return; }
+  // aggiornamento disponibile: dichiara file e peso PRIMA di scaricare, e chiedi un secondo click
+  const weights=(d.files||[]).some(f=>/safetensors/.test(f.path));
+  n.innerHTML=esc((d.files||[]).slice(0,3).map(f=>f.path).join(', ')+(d.n_files>3?' +'+(d.n_files-3):''))
+    +' · <b>'+fmtBytes(d.bytes||0)+'</b>'+(weights?'':' · '+tr('weights unchanged · no re-download'));
+  updPending=d; b.textContent=tr('Update')+' ('+fmtBytes(d.bytes||0)+')'; b.classList.add('on'); b.disabled=false;
+}
+async function applyUpdate(){
+  const b=$('#btnCheckUpd'), n=$('#updNote');
+  if(busy){ n.textContent=LANG==='it'?'Aspetta la fine della generazione.':'Wait for the generation to finish.'; return; }
+  b.disabled=true; n.textContent=tr('Applying…'); let err=null;
+  try{
+    await streamNDJSON('/api/download',{},o=>{
+      if(o.pct!==undefined) n.textContent=tr('Applying…')+' '+o.pct+'% · '+o.speed+' MB/s';
+      else if(o.error) err=o.error;
+    });
+    if(!err){  // i file nuovi (es. chat_template) contano solo dopo aver ricaricato il modello
+      n.textContent=tr('Reloading the model…');
+      await streamNDJSON('/api/reload',{model:$('#modelin').value.trim()||curModel},o=>{ if(o.error)err=o.error; });
+    }
+  }catch(e){ err=String(e); }
+  n.textContent=err?(tr('Update failed')+': '+String(err).slice(0,110)):tr('Updated and reloaded.');
+  n.style.color=err?'var(--danger)':'';
+  if(!err){ loadErrDismissed=false; loadConfig(); loadModels(); }
+  updIdle();
+}
+$('#btnCheckUpd').onclick=()=>{ updPending?applyUpdate():checkUpdate(); };
+$('#saveModel').onclick=async()=>{ if(busy)return;  // niente hot-reload del modello mentre sta generando
+  const m=$('#modelin').value.trim(); if(!m)return; const n=$('#saveNote'); const b=$('#saveModel'); b.disabled=true;
+  try{ await streamNDJSON('/api/reload',{model:m},o=>{ if(o.status)n.textContent=o.status; if(o.error)n.textContent=o.error; if(o.done){ n.textContent=tr('Model loaded and ready.'); loadErrDismissed=false; } }); }catch(e){ n.textContent=String(e); }
+  finally{ b.disabled=false; } };
 
 /* ---- export menu ---- */
 $('#btnExport').onclick=(e)=>{ e.stopPropagation(); toggleExport(); };
 function toggleExport(){ let m=$('#expmenu'); if(m){ m.remove(); return; }
   m=el('div','expmenu'); m.id='expmenu';
   const items=[['copy','Copy text','copy'],['md','Markdown','M'],['txt','Text','T'],['html','HTML','<>'],['pdf','PDF','P'],['compact','Compact into 1 prompt','green']];
-  items.forEach((it,i)=>{ if(i===1||i===5){const dv=el('div','dv');m.appendChild(dv);} const row=el('div','it'+(it[2]==='green'?' green':''));
+  items.forEach((it,i)=>{ if(i===1||i===5){const dv=el('div','dv');m.appendChild(dv);} const row=el('div','it'+(it[2]==='green'?' green':'')); row.setAttribute('role','button'); row.setAttribute('tabindex','0');
     if(it[2]==='copy') row.innerHTML='<svg width="15" height="15" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2" stroke="var(--accent-text)" stroke-width="2"></rect><path d="M5 15V5a2 2 0 0 1 2-2h10" stroke="var(--accent-text)" stroke-width="2" stroke-linecap="round"></path></svg>'+tr(it[1]);
     else if(it[2]==='green') row.innerHTML='<svg width="15" height="15" viewBox="0 0 24 24"><path d="M20 8 12 16 4 8" stroke="var(--live)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path></svg>'+tr(it[1]);
     else row.innerHTML='<span class="k">'+it[2]+'</span>'+tr(it[1]);
@@ -873,7 +1001,7 @@ function chatToHTMLDoc(){
     +'<div class="hsub">'+esc(modelName)+' · '+(it?'esportato il ':'exported ')+esc(date)+'</div></div>';
   let body='<div class="doc">'+header;
   history.forEach(h=>{ const role=h.role==='user'?'You':'Gephid'; const cls=h.role==='user'?'user':'gep';
-    const inner=(window.marked&&window.DOMPurify)?DOMPurify.sanitize(marked.parse(h.content||'')):esc(h.content||'').replace(/\n/g,'<br>');
+    const inner=(window.marked&&window.DOMPurify)?DOMPurify.sanitize(marked.parse(mathEscape(h.content||''))):esc(h.content||'').replace(/\n/g,'<br>');
     body+='<div class="turn '+cls+'"><div class="role">'+role+'</div><div class="b">'+inner+'</div></div>'; });
   return css+body+'</div>';  // footer NON nel flusso: per il PDF è per-pagina (backend), per l'HTML lo aggiunge doExport
 }
@@ -901,11 +1029,16 @@ function toast(msg,err){ document.querySelectorAll('.toast.transient').forEach(x
   const t=el('div','toast transient'); if(err){t.style.borderColor='var(--danger-border)';t.style.background='var(--danger-bg)';}
   t.innerHTML=(err?'<span style="color:var(--danger);font-weight:700">⚠</span>':'<span class="ok">✓</span>')+esc(msg); document.body.appendChild(t); setTimeout(()=>t.remove(),err?5000:2400); }
 async function compactChat(){
-  if(busy||!history.length) return; setBusy(true);
+  if(busy||!history.length) return; setBusy(true); stickBottom=true;
   const sb=addTurn('gep'); const body=el('div','msg'); body.style.whiteSpace='pre-wrap'; sb.appendChild(body);
-  let acc=''; aborter=new AbortController();
-  try{ await streamNDJSON('/api/compact',{messages:history},function(o){ if(o.delta!==undefined){acc+=o.delta; body.textContent=acc;} else if(o.status){ if(!acc)body.textContent=(window.trStatus?trStatus(o.status,LANG):o.status); } else if(o.error){ body.textContent='⚠ '+o.error; } }, aborter.signal); }catch(e){}
-  setBusy(false); aborter=null; renderMd(body,acc);
+  let acc='',cerr=null; aborter=new AbortController();
+  try{ await streamNDJSON('/api/compact',{messages:history},function(o){ if(o.delta!==undefined){acc+=o.delta; body.textContent=acc;} else if(o.status){ if(!acc)body.textContent=(window.trStatus?trStatus(o.status,LANG):o.status); } else if(o.error){ cerr=o.error; } }, aborter.signal); }catch(e){}
+  setBusy(false); aborter=null;
+  // l'errore va tenuto: prima veniva scritto nel body e poi cancellato da renderMd(body,'') — con
+  // acc vuoto la compattazione fallita non mostrava NULLA. Senza testo utile, mostra solo l'errore.
+  if(cerr&&!acc.trim()){ body.textContent='⚠ '+(window.trStatus?trStatus(cerr,LANG):cerr); body.style.color='var(--danger)'; scrollDown(); return; }
+  renderMd(body,acc); body.dataset.src=acc;  // sorgente grezza per Copia/Scarica
+  if(cerr) toast((window.trStatus?trStatus(cerr,LANG):cerr).slice(0,140),true);  // errore a metà stream: tieni il parziale e avvisa
   let copied = acc ? await copyText(acc) : false;
   const m=el('div','meta mono'); const sv=el('span','act'); sv.dataset.k='dl';
   sv.innerHTML='<svg width="13" height="13" viewBox="0 0 24 24"><path d="M12 4v11m0 0 4-4m-4 4-4-4M5 20h14" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path></svg>'+tr('Download'); m.appendChild(sv);
@@ -925,7 +1058,8 @@ async function compactChat(){
   else { pollHealth(); loadConfig(); }
 })();
 let sysDefault='';
-async function loadConfig(){ try{ const c=await(await fetch('/api/config')).json(); curSteps=c.default_steps||32; curMaxTok=c.default_max_tokens||8192; curOcr=c.ocr_engine||'local'; setSeg('ocr',curOcr);
+async function loadConfig(){ try{ const c=await(await fetch('/api/config')).json(); curSteps=c.default_steps||48; curMaxTok=c.default_max_tokens||32768; curOcr=c.ocr_engine||'local'; setSeg('ocr',curOcr);
+  if(typeof showRev==='function') showRev(c.model_rev);
   sysDefault=c.system_prompt_default||''; if($('#sysPrompt'))$('#sysPrompt').value=(c.system_prompt!==undefined?c.system_prompt:sysDefault); }catch(e){} }
 $('#saveSys').onclick=()=>{ postConfig({system_prompt:$('#sysPrompt').value}); toast(LANG==='it'?'Istruzioni salvate':'Instructions saved'); };
 $('#resetSys').onclick=()=>{ $('#sysPrompt').value=sysDefault; postConfig({system_prompt:sysDefault}); toast(LANG==='it'?'Ripristinato al predefinito':'Reset to default'); };
@@ -958,8 +1092,12 @@ function seedDemo(){
   scrollDown();
 }
 // a11y tastiera: Esc chiude modali/menu; Enter/Space attivano gli elementi role=button
+// (delegato sul document: copre anche i role=button creati DOPO il load — chip, menu export, meta)
 document.addEventListener('keydown',e=>{ if(e.key==='Escape'){ ['#settings','#confirm'].forEach(s=>{const n=$(s);if(n)n.classList.add('hidden');}); const m=$('#expmenu'); if(m)m.remove(); } });
-document.querySelectorAll('[role=button]').forEach(b=>b.addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); b.click(); } }));
+document.addEventListener('keydown',e=>{ const t=e.target;
+  if((e.key==='Enter'||e.key===' ')&&t&&t.getAttribute&&t.getAttribute('role')==='button'){ e.preventDefault(); t.click(); } });
+// i controlli non-button (segmented, stepper) diventano raggiungibili e attivabili da tastiera
+document.querySelectorAll('.seg .o,.stepper .b').forEach(n=>{ n.setAttribute('role','button'); n.setAttribute('tabindex','0'); });
 window.applyLang=applyLang; window.applyTheme=applyTheme;
 </script>
 </body>

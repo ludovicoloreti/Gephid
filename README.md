@@ -31,7 +31,8 @@ leaves your computer.
   - Images: the model sees them (vision).
   - Documents: txt, md, source code, PDF, Word, Excel, CSV. Text is extracted and token-counted;
     documents too large for the GPU are read in chunks and summarized (map-reduce).
-  - Scanned PDFs: read with on-device OCR (Apple Vision), no network.
+  - Scanned PDFs (even mixed text+scan ones): read with on-device OCR — local GLM-OCR by default,
+    Apple Vision or an oMLX router selectable from Settings. No network.
 - **Markdown plus LaTeX and chemistry formulas** (KaTeX).
 - **Export** of a whole chat or a single message to MD, TXT, HTML or PDF (saved to `~/Downloads`).
   PDF and HTML carry a header (model used, export date) and a per-page footer.
@@ -70,7 +71,10 @@ note on Windows/`.exe`: **[BUILD.md](BUILD.md)**.
 - **Apple Silicon** Mac (M1 or newer). Intel Macs are not supported: inference uses MLX, which is Apple Silicon only.
 - **macOS 11** or newer.
 - **Disk**: about 30 GB free for the model (it lives in `~/.cache/huggingface/hub`).
-- **Internet only on first launch** to download the model; everything runs offline afterwards.
+- **Internet only on first launch** to download the model; everything runs offline afterwards. The
+  only other time Gephid touches the network is if *you* press **Settings → Model → Check for
+  updates**: it tells you which files would change and how big they are before downloading anything.
+  No automatic check at startup.
 - To rebuild from source: Go and the Xcode Command Line Tools.
 
 ### Memory and which model to use

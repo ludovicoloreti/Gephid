@@ -19,7 +19,7 @@ Gephid/
 │   ├── backend/
 │   │   ├── diffuchat.py       # backend: server HTTP + modello
 │   │   ├── page.html         # UI (HTML/CSS/JS), servita da disco a ogni richiesta
-│   │   └── static/           # librerie vendorizzate: marked, DOMPurify, html2pdf, KaTeX + font
+│   │   └── static/           # librerie vendorizzate: marked, DOMPurify, html2pdf, KaTeX (+ mhchem) + font
 │   └── launcher/
 │       ├── main.go           # guscio Go + WKWebView + cgo (menu, file/save panel, dettatura)
 │       └── go.mod go.sum logo.svg
@@ -74,20 +74,30 @@ Gephid/
 ## API (su 127.0.0.1:8890)
 `GET /` UI · `GET /api/health` · `GET /api/models` · `GET /api/config` · `GET /static/...` ·
 `POST /api/chat` (NDJSON streaming, `attach`=id immagini/doc) · `POST /api/compact` (streaming) ·
-`POST /api/ingest` (file→immagine/doc, OCR per PDF scansionati) · `POST /api/save` ·
-`POST /api/config` (step/maxtok, effetto immediato) · `POST /api/reload` (ricarica modello a caldo).
+`POST /api/ingest` (file→immagine/doc, OCR per pagine scansionate — anche in PDF misti;
+`cancel_token` per annullare) · `POST /api/ingest/cancel` · `POST /api/save` (default `~/Downloads`;
+`path` dal pannello nativo, solo dentro la home) · `POST /api/config` (step/maxtok/ocr/pre-prompt,
+effetto immediato) · `POST /api/reload` (ricarica modello a caldo) · `POST /api/download`
+(scarica/aggiorna il modello; il totale mostrato è il delta) · `POST /api/download/pause` ·
+`POST /api/model/check` (revisione locale vs HuggingFace).
+
+Rete usata **solo** da `/api/download` e `/api/model/check`, entrambe su azione esplicita
+dell'utente: nessun controllo automatico all'avvio.
 
 ## Funzioni
 Streaming + stop · memoria per-sessione (finestra + riassunto cumulativo) · compattazione in 1
 prompt · export MD/TXT/HTML/PDF · markdown + LaTeX/chimica (KaTeX) · temi · allegati: immagini
 (vision), documenti txt/md/codice/PDF/Word/Excel/CSV (estrazione + map-reduce per i grandi), PDF
-scansionati via OCR Apple Vision con fallback vision · dettatura on-device opt-in.
+scansionate via OCR (3 motori: GLM-OCR in-process di default, Apple Vision, router oMLX; vision
+come ultimo fallback) · dettatura on-device opt-in.
 
 ## Build
 `./build.sh` assembla `Gephid.app`; `./build.sh --install` la installa anche in /Applications.
-Scarica python-build-standalone, fa `pip install` (mlx-vlm, pypdf, python-docx, openpyxl, pymupdf,
-ocrmac) e le librerie JS, compila il Go, assembla e firma ad-hoc. Idempotente (riusa il python
-esistente; per rifarlo da zero: `rm -rf Gephid.app/Contents/Resources/python`). Dettagli in
+Scarica python-build-standalone, fa `pip install` con versioni PINNATE (mlx-vlm, pypdf, python-docx,
+openpyxl, pymupdf, ocrmac) e le librerie JS pinnate, compila il Go, assembla e firma ad-hoc. Due
+stamp — `static/.versions` e `Resources/python/.gephid-deps` — rendono i pin effettivi: se un pin
+cambia si ri-vendorizza o reinstalla, se non cambia si salta tutto (idempotente, ~4s). Per rifare da
+zero: `rm -rf Gephid.app/Contents/Resources/python src/backend/static`. Dettagli in
 [BUILD.it.md](BUILD.it.md).
 
 ## Requisiti

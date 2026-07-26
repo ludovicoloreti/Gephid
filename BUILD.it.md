@@ -21,8 +21,8 @@ cd Gephid
 ```
 
 ### Cosa fa `build.sh` (6 passi)
-1. **Front-end**: scarica e vendorizza marked, DOMPurify, html2pdf, KaTeX e i font in `src/backend/static/` (niente CDN a runtime).
-2. **Python embeddato**: scarica l'interprete relocabile di [python-build-standalone](https://github.com/astral-sh/python-build-standalone) in `Gephid.app/Contents/Resources/python` e installa le dipendenze (`mlx-vlm pypdf python-docx openpyxl pymupdf ocrmac`). Idempotente: salta se è già presente.
+1. **Front-end**: scarica e vendorizza marked, DOMPurify, html2pdf, KaTeX + mhchem (chimica) e i font in `src/backend/static/` (niente CDN a runtime). Le versioni sono pinnate in cima a `build.sh`; lo stamp `static/.versions` registra cosa è stato vendorizzato, così alzare un pin riscarica davvero invece di tenersi in silenzio il file vecchio.
+2. **Python embeddato**: scarica l'interprete relocabile di [python-build-standalone](https://github.com/astral-sh/python-build-standalone) in `Gephid.app/Contents/Resources/python` e installa le dipendenze pinnate (`PYDEPS` in `build.sh`). Lo stamp `Resources/python/.gephid-deps` registra interprete e pin: se cambia `PYDEPS` reinstalla i pacchetti, se cambiano `PYVER`/`PYTAG` rifà l'interprete, altrimenti salta del tutto.
 3. **Launcher Go**: `CGO_ENABLED=1 go build` del guscio Cocoa/WKWebView.
 4. **Bundle**: assembla `Contents/` (binario, `diffuchat.py`, `page.html`, `static/`, icona, `Info.plist`).
 5. **Firma** ad-hoc (`codesign`).

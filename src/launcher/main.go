@@ -17,6 +17,7 @@ static void installEditMenu(void) {
   [mainMenu addItem:appItem];
   NSMenu *appMenu = [[NSMenu alloc] init];
   [appMenu addItemWithTitle:@"Nascondi" action:@selector(hide:) keyEquivalent:@"h"];
+  [appMenu addItemWithTitle:@"Chiudi finestra" action:@selector(performClose:) keyEquivalent:@"w"];
   [appMenu addItemWithTitle:@"Esci" action:@selector(terminate:) keyEquivalent:@"q"];
   [appItem setSubmenu:appMenu];
   NSMenuItem *editItem = [[NSMenuItem alloc] init];
@@ -46,6 +47,12 @@ static NSString *g_final = nil;    // segmenti già conclusi (accumulati)
 static NSString *g_partial = nil;  // segmento in corso (parziale)
 static NSLock *g_lock = nil;
 static long g_epoch = 0;           // invalida i task vecchi (riavvio/reset/stop)
+// "sto registrando": flag scalare, NON il puntatore g_engine. I callback del recognizer girano su
+// una coda del framework Speech: leggere lì g_engine (static strong, ARC) mentre il main thread lo
+// azzera fa fare a ARC un retain su un oggetto in deallocazione -> crash. Un int non ha questo
+// problema, e non richiede di tenere il lock attorno a [g_engine stop] (che aspetta il tap audio,
+// il quale prende g_lock: si deadlockerebbe).
+static volatile int g_running = 0;
 
 static void gephidDictInit(void) {
   g_lock = [[NSLock alloc] init];
@@ -60,7 +67,9 @@ static void startSegment(void) {
   r.shouldReportPartialResults = YES;
   if ([g_recog supportsOnDeviceRecognition]) r.requiresOnDeviceRecognition = YES;
   [g_lock lock]; g_req = r; [g_lock unlock];
-  g_task = [g_recog recognitionTaskWithRequest:r resultHandler:^(SFSpeechRecognitionResult *res, NSError *e){
+  // il task va pubblicato SOTTO LOCK: gephidDictStop/Reset lo leggono sotto lock per cancellarlo,
+  // e questa assegnazione può arrivare dalla coda del recognizer (riavvio di segmento).
+  SFSpeechRecognitionTask *t = [g_recog recognitionTaskWithRequest:r resultHandler:^(SFSpeechRecognitionResult *res, NSError *e){
     [g_lock lock]; BOOL current = (myEpoch == g_epoch); [g_lock unlock];
     if (!current) return; // task obsoleto (reset/stop/riavvio): ignora
     if (res) {
@@ -71,7 +80,7 @@ static void startSegment(void) {
         if (g_partial.length) g_final = [NSString stringWithFormat:@"%@%@%@", g_final, (g_final.length ? @" " : @""), g_partial];
         g_partial = @"";
         [g_lock unlock];
-        if (g_engine) startSegment(); // continua oltre la pausa
+        if (g_running) startSegment(); // continua oltre la pausa
       }
     } else if (e) {
       // timeout/silenzio: salva il parziale corrente prima di riavviare (altrimenti si perde)
@@ -80,16 +89,17 @@ static void startSegment(void) {
       g_partial = @"";
       [g_lock unlock];
       // riavvia con un piccolo backoff (evita lo spin se il recognizer erra di continuo)
-      if (g_engine) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(120 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{ if (g_engine) startSegment(); });
+      if (g_running) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(120 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{ if (g_running) startSegment(); });
     }
   }];
+  [g_lock lock]; g_task = t; [g_lock unlock];
 }
 // 0 = ok · -1 = recognizer non disponibile · -2 = microfono/audio non avviabile
 // -3 = permesso non ancora deciso (richiesto ora: approvarlo e riprovare) · -4 = permesso negato
 static int gephidDictStart(void) {
   if (!g_lock) gephidDictInit();
   [g_lock lock]; g_final = @""; g_partial = @""; [g_lock unlock];
-  if (g_engine) return 0; // già attivo
+  if (g_running) return 0; // già attivo
   // permesso riconoscimento vocale
   SFSpeechRecognizerAuthorizationStatus sa = [SFSpeechRecognizer authorizationStatus];
   if (sa == SFSpeechRecognizerAuthorizationStatusNotDetermined) {
@@ -119,6 +129,7 @@ static int gephidDictStart(void) {
   [g_engine prepare];
   NSError *err = nil;
   if (![g_engine startAndReturnError:&err]) { g_engine = nil; return -2; }
+  g_running = 1;   // prima di startSegment: i riavvii di segmento lo consultano
   startSegment();
   return 0;
 }
@@ -130,9 +141,10 @@ static void gephidDictReset(void) {
   SFSpeechRecognitionTask *t = g_task; g_task = nil; [g_lock unlock];
   if (t) [t cancel];
   if (r) [r endAudio];
-  if (g_engine) startSegment();
+  if (g_running) startSegment();
 }
 static void gephidDictStop(void) {
+  g_running = 0;   // PRIMA di fermare il motore: nessun callback in volo riavvia un altro segmento
   if (g_engine) { [g_engine stop]; [[g_engine inputNode] removeTapOnBus:0]; g_engine = nil; }
   [g_lock lock]; ++g_epoch;
   SFSpeechAudioBufferRecognitionRequest *r = g_req; g_req = nil;
@@ -242,20 +254,11 @@ func otherLaunchersAlive() bool {
 	return false
 }
 
-// killBackend: spegne il backend. Se l'ho avviato io (cmd) uccido il gruppo; altrimenti lo trovo per porta.
+// killBackend: spegne il backend che HO avviato io (gruppo di processi). Mai un kill "per porta":
+// ucciderebbe un backend che un'altra finestra potrebbe aver adottato.
 func killBackend(cmd *exec.Cmd) {
 	if cmd != nil && cmd.Process != nil {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		return
-	}
-	out, err := exec.Command("lsof", "-ti", "tcp:"+strconv.Itoa(portFromAddr())).Output()
-	if err != nil {
-		return
-	}
-	for _, f := range strings.Fields(string(out)) {
-		if pid, e := strconv.Atoi(f); e == nil && pid > 0 {
-			_ = syscall.Kill(pid, syscall.SIGKILL)
-		}
 	}
 }
 
@@ -271,7 +274,12 @@ func startBackend(py, script, home string) (*exec.Cmd, chan error, error) {
 		"TMPDIR=" + os.TempDir(),
 		"HF_HUB_OFFLINE=1", "TRANSFORMERS_OFFLINE=1", "TOKENIZERS_PARALLELISM=false",
 	}
-	if lf, err := os.OpenFile(filepath.Join(home, "gephid-backend.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
+	logPath := filepath.Join(home, "gephid-backend.log")
+	// rotazione: il log è in append e non veniva mai potato — oltre i 5MB ruota su .old
+	if st, err := os.Stat(logPath); err == nil && st.Size() > 5*1024*1024 {
+		_ = os.Rename(logPath, logPath+".old")
+	}
+	if lf, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
 		cmd.Stdout = lf
 		cmd.Stderr = lf
 	} else {
@@ -284,15 +292,6 @@ func startBackend(py, script, home string) (*exec.Cmd, chan error, error) {
 	died := make(chan error, 1)
 	go func() { died <- cmd.Wait() }()
 	return cmd, died, nil
-}
-
-func portFromAddr() int {
-	if i := strings.LastIndex(backendAddr, ":"); i >= 0 {
-		if p, e := strconv.Atoi(backendAddr[i+1:]); e == nil {
-			return p
-		}
-	}
-	return 8890
 }
 
 // portOpen: qualcuno ascolta già sulla porta (anche se non risponde ancora HTTP)?
@@ -454,7 +453,17 @@ func main() {
 		booted := false
 		for time.Now().Before(deadline) {
 			select {
-			case err := <-procDied: // morto durante il boot: di solito è un crash d'avvio persistente, mostro l'errore
+			case err := <-procDied: // morto durante il boot
+				// Se la porta è già servita da un ALTRO backend (due finestre avviate nello stesso
+				// istante: il mio ha perso la corsa al bind), adottalo invece di mostrare l'errore.
+				if reachable, _, _ := checkHealth(); reachable {
+					iStartedIt = false
+					bmu.Lock()
+					cmd = nil
+					bmu.Unlock()
+					procDied = nil // canale nil: in select non scatta più
+					continue
+				}
 				msg := "Il backend Python si è chiuso inaspettatamente."
 				if err != nil {
 					msg += "<br><br><code>" + html.EscapeString(err.Error()) + "</code>"
@@ -500,21 +509,22 @@ func main() {
 			if time.Since(lastStart) > 60*time.Second {
 				restarts = 0 // era stabile da un po': azzero il contatore dei tentativi
 			}
-			for { // riavvio con backoff progressivo; mi arrendo dopo troppi tentativi ravvicinati
+			for { // riavvio con backoff progressivo (tetto 30s): mai arrendersi in silenzio —
+				// l'overlay "Backend non raggiungibile" della pagina resta vero solo finché ritento
 				select {
 				case <-closed:
 					return
 				default:
 				}
 				restarts++
-				if restarts > 6 {
-					fmt.Println("Gephid: backend instabile, smetto di riavviarlo")
-					return
+				wait := time.Duration(restarts) * time.Second
+				if wait > 30*time.Second {
+					wait = 30 * time.Second
 				}
 				select { // backoff progressivo, ma interrompibile dalla chiusura della finestra
 				case <-closed:
 					return
-				case <-time.After(time.Duration(restarts) * time.Second):
+				case <-time.After(wait):
 				}
 				c, died, err := startBackend(py, script, home)
 				if err == nil {

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 diffuchat — chat web per Gephid (text diffusion, MLX).
-Avvio (nel venv mlx-vlm):  ~/.venv-mlxvlm/bin/python ~/Desktop/AI/diffuchat.py
-UI: temi chiaro/scuro/sistema, impostazioni (modello + percorsi), markdown.
+Avvio (nel venv mlx-vlm):  ~/.venv-mlxvlm/bin/python src/backend/diffuchat.py
+UI: page.html su / (default), vecchia UI inline su /old. Temi, impostazioni, markdown + KaTeX.
 """
 import http.server, json, threading, time, sys, os, hashlib, base64, subprocess, tempfile, uuid, io, re
 
@@ -40,7 +40,7 @@ def validate_config(cfg):
     if isinstance(cfg, dict):
         m = cfg.get("model")
         if isinstance(m, str) and m.strip(): out["model"] = m.strip()
-        out["port"] = _coerce_int(cfg.get("port"), 1, 65535, DEFAULTS["port"])
+        out["port"] = _coerce_int(cfg.get("port"), 1024, 65535, DEFAULTS["port"])  # niente porte privilegiate (<1024: bind fallirebbe)
         out["default_steps"] = _coerce_int(cfg.get("default_steps"), STEP_MIN, STEP_MAX, DEFAULTS["default_steps"])
         out["default_max_tokens"] = _coerce_int(cfg.get("default_max_tokens"), TOK_MIN, TOK_MAX, DEFAULTS["default_max_tokens"])
         oe = cfg.get("ocr_engine")
@@ -184,7 +184,9 @@ def _html_to_pdf(html, footer=""):
     """Rende un documento HTML in un PDF con testo selezionabile (pymupdf/fitz Story).
     Usato dall'export chat in PDF: niente html2canvas lato browser (produceva PDF vuoti).
     `footer`: stringa stampata in fondo a OGNI pagina."""
-    import fitz
+    # 'pymupdf' è il nome vero del modulo; 'fitz' resta solo come shim legacy (`from pymupdf import *`)
+    # e va verso la rimozione. Il resto del file importa già pymupdf: qui allineiamo.
+    import pymupdf as fitz
     buf = io.BytesIO()
     story = fitz.Story(html=html)
     writer = fitz.DocumentWriter(buf)
@@ -247,7 +249,16 @@ def genera_stream(messages, steps, max_tokens, on_delta, images=None, on_event=N
     della UI con dati veri del modello invece di un timer."""
     if images:
         from mlx_vlm.prompt_utils import apply_chat_template as _vlm_tmpl
-        formatted = _vlm_tmpl(PROC, getattr(MODELO, "config", None), messages, num_images=len(images))
+        # CONTINUAZIONE anche con immagini: il turno parziale dell'assistente va APPESO al prompt
+        # (turno non chiuso), non passato al template come turno completo — altrimenti il modello
+        # ricomincia da capo invece di proseguire. Caso reale: Stop e poi "Continua" su una risposta
+        # con immagine allegata (gli id degli allegati restano attivi per il turno).
+        partial = ""
+        tmpl_msgs = messages
+        if cont and messages and messages[-1].get("role") == "assistant":
+            partial = messages[-1].get("content", "") or ""
+            tmpl_msgs = messages[:-1]
+        formatted = _vlm_tmpl(PROC, getattr(MODELO, "config", None), tmpl_msgs, num_images=len(images)) + partial
     elif cont and messages and messages[-1].get("role") == "assistant":
         # CONTINUAZIONE: il prompt finisce col parziale assistant (turno non chiuso) -> il modello prosegue da lì
         partial = messages[-1].get("content", "") or ""
@@ -347,6 +358,8 @@ print(f"tetto sequenza GPU: MAX_SEQ={MAX_SEQ}, SAFE_SEQ={SAFE_SEQ}", flush=True)
 DOC_CTX = max(8000, SAFE_SEQ // 2)
 UPLOAD_DIR = os.path.join(tempfile.gettempdir(), "gephid-uploads")
 INGEST = {}        # id -> {"kind":"image"/"doc","name","path"(img)/"text"(doc),"tokens"}
+INGEST_LOCK = threading.Lock()   # protegge INGEST/INGEST_CANCELS (handler HTTP concorrenti)
+INGEST_CANCELS = {}  # cancel_token -> threading.Event: la × sul chip annulla l'OCR anche lato server
 IMG_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".heic", ".tiff"}
 
 MAX_DECOMPRESSED = 300 * 1024 * 1024  # 300MB: difesa contro "zip bomb" in docx/xlsx
@@ -384,7 +397,20 @@ def _extract_text(name, data):
     if ext == ".docx":
         _check_zip_bomb(data)
         import docx
-        return "\n".join(p.text for p in docx.Document(io.BytesIO(data)).paragraphs)
+        from docx.table import Table
+        from docx.text.paragraph import Paragraph
+        doc = docx.Document(io.BytesIO(data))
+        out = []
+        # itera il body in ordine: paragrafi E tabelle (doc.paragraphs da solo perde le tabelle,
+        # dove spesso stanno i dati). Le righe di tabella escono come TSV.
+        for child in doc.element.body.iterchildren():
+            tag = child.tag.rsplit("}", 1)[-1]
+            if tag == "p":
+                out.append(Paragraph(child, doc).text)
+            elif tag == "tbl":
+                for row in Table(child, doc).rows:
+                    out.append("\t".join(c.text.strip() for c in row.cells))
+        return "\n".join(out)
     if ext in (".xlsx", ".xlsm"):
         _check_zip_bomb(data)
         import openpyxl
@@ -419,13 +445,14 @@ def _extract_text(name, data):
 
 MAX_PDF_RENDER_PAGES = 8  # PDF scansionato: quante pagine rendere in immagini per la vision
 
-def _render_pdf_to_images(fid, data):
+def _render_pdf_to_images(fid, data, pages=None):
+    """Rende in PNG le pagine indicate (indici 0-based); default: le prime MAX_PDF_RENDER_PAGES."""
     import pymupdf
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     doc = pymupdf.open(stream=data, filetype="pdf")
-    n = min(doc.page_count, MAX_PDF_RENDER_PAGES)
+    idxs = [i for i in (pages if pages is not None else range(MAX_PDF_RENDER_PAGES)) if i < doc.page_count]
     paths = []
-    for i in range(n):
+    for i in idxs:
         pix = doc.load_page(i).get_pixmap(dpi=200)  # 200 dpi: buona resa per OCR
         p = os.path.join(UPLOAD_DIR, f"{fid}_p{i}.png")
         pix.save(p)
@@ -433,11 +460,17 @@ def _render_pdf_to_images(fid, data):
     doc.close()
     return paths
 
-# OCR: due motori selezionabili. Default "apple" = autosufficiente (Apple Vision, dentro la .app).
-# "omlx" = router multi-modello potente (GLM-OCR + dots.mocr) servito da oMLX su :8000, con
-# fallback automatico ad Apple Vision se il server non risponde. Si attiva con GEPHID_OCR=omlx.
-# selezione motore: env GEPHID_OCR ha priorità (utile per test da shell), poi config.json
-# (così è configurabile anche nella .app lanciata da GUI, dove l'env è pulito), default "apple".
+CANCEL_MSG = "Lettura annullata."
+def _check_cancel(cancel):
+    if cancel is not None and cancel.is_set():
+        raise RuntimeError(CANCEL_MSG)
+
+# OCR: motori selezionabili. Default "local" = GLM-OCR caricato in-process (autosufficiente, gira
+# sul worker del modello). "apple" = Apple Vision, leggero e integrato. "omlx"/"paranoid" = router
+# multi-modello (GLM-OCR + dots.mocr, con voto a 3 nel caso paranoid) servito da oMLX su :8000.
+# Tutti ripiegano su Apple Vision se falliscono o restituiscono vuoto.
+# Selezione motore: env GEPHID_OCR ha priorità (utile per test da shell), poi config.json
+# (così è configurabile anche nella .app lanciata da GUI, dove l'env è pulito), default "local".
 OCR_ENGINE   = os.environ.get("GEPHID_OCR", CFG.get("ocr_engine", "local")).lower()
 OCR_LOCAL_MODEL = os.environ.get("OCR_LOCAL_MODEL", "mlx-community/GLM-OCR-8bit")  # OCR in-process
 OMLX_OCR_URL = os.environ.get("OMLX_URL", "http://127.0.0.1:8000/v1/chat/completions")
@@ -490,12 +523,14 @@ def _ocr_vote_note(reads):
     if not lines: return ""
     return f"\n\n> ⚠ **Cifre da verificare (voto a {n} modelli):**\n> " + "\n> ".join(lines)
 
-def _ocr_images_omlx(paths, paranoid=False):
+def _ocr_pages_omlx(paths, paranoid=False, cancel=None):
     """Router OCR su oMLX: GLM-OCR di default; pagine strutturate (tabelle/listini) -> dots.mocr.
-    Se paranoid, sulle pagine con cifre critiche fa votare 3 modelli e appende la nota di verifica."""
+    Se paranoid, sulle pagine con cifre critiche fa votare 3 modelli e appende la nota di verifica.
+    Ritorna una lista di testi, uno per pagina."""
     import re
     out = []
     for p in paths:
+        _check_cancel(cancel)
         glm = _omlx_ocr_page("GLM-OCR-8bit", p)
         rows = len(re.findall(r"<tr[ >]", glm, re.I)) + sum(1 for ln in glm.splitlines() if ln.count("|") >= 2)
         nums = sum(1 for ln in glm.splitlines() if re.match(r"^\s*€?\s*\d[\d.,]*\s*%?\s*$", ln.strip()))
@@ -514,15 +549,17 @@ def _ocr_images_omlx(paths, paranoid=False):
                 except Exception: pass
                 md = md + _ocr_vote_note(reads)
         out.append(md)
-    return "\n\n".join(out).strip()
+    return out
 
 def run_on_worker(fn):
-    """Esegue fn() sul thread-worker del modello (lo stesso della chat) e ne ritorna il risultato.
-    Serializza OCR e generazione: mai concorrenti sulla GPU → niente contesa, niente impallamento.
+    """Esegue fn(status) sul thread-worker del modello (lo stesso della chat) e ne ritorna il
+    risultato. Serializza OCR e generazione: mai concorrenti sulla GPU → niente contesa.
+    fn riceve una callback status(str): ogni chiamata emette un evento che azzera il timeout
+    (JOB_EVENT_TIMEOUT), così un lavoro lungo ma vivo (OCR multi-pagina) non fallisce spurio.
     Bloccante; chiamato dal thread HTTP dell'ingest."""
     box = {}
     def job_fn(job):
-        box["val"] = fn()
+        box["val"] = fn(lambda s: job.q.put(("status", s)))
     job = Job(job_fn)
     if not _WORKER_ALIVE.is_set(): raise RuntimeError("motore locale non attivo")
     JOBS.put(job)
@@ -531,6 +568,7 @@ def run_on_worker(fn):
             ev = job.q.get(timeout=JOB_EVENT_TIMEOUT)
         except queue.Empty:
             raise RuntimeError("il motore locale non risponde")
+        if ev[0] == "status": continue  # keep-alive: il worker sta ancora lavorando
         if ev[0] == "error": box["err"] = ev[1]
         if ev[0] == "end": break
     if "err" in box: raise RuntimeError(box["err"])
@@ -558,90 +596,155 @@ def _ocr_page_inproc(path):
         if out.rstrip().endswith("```"): out = out.rstrip()[:-3]
     return out.strip()
 
-def _ocr_images_local(paths):
+def _ocr_pages_local(paths, cancel=None):
     """OCR self-contained: GLM-OCR nel processo di Gephid, eseguito sul worker del modello.
-    Niente server esterni, niente seconda GPU-engine: OCR e chat si alternano sullo stesso thread."""
-    def work():
+    Niente server esterni, niente seconda GPU-engine: OCR e chat si alternano sullo stesso thread.
+    Ritorna una lista di testi, uno per pagina."""
+    def work(status):
+        status("Preparo il motore OCR…")
         _ensure_ocr_model()
         out = []
         with GEN_LOCK:
-            for p in paths:
+            for i, p in enumerate(paths):
+                _check_cancel(cancel)
+                status(f"OCR pagina {i + 1} di {len(paths)}…")  # keep-alive: azzera il timeout del worker
                 out.append(_ocr_page_inproc(p))
-        return "\n\n".join(out).strip()
+        return out
     return run_on_worker(work)
 
-def _ocr_images_apple(paths):
-    """OCR nativo macOS (Apple Vision, offline). Ritorna il testo riconosciuto."""
+def _ocr_pages_apple(paths, cancel=None):
+    """OCR nativo macOS (Apple Vision, offline). Ritorna una lista di testi, uno per pagina."""
     try:
         from ocrmac import ocrmac
     except Exception as e:
-        print("ocrmac non disponibile:", e, flush=True); return ""
+        print("ocrmac non disponibile:", e, flush=True); return ["" for _ in paths]
     out = []
     for p in paths:
+        _check_cancel(cancel)
         try:
             res = ocrmac.OCR(p, language_preference=["it-IT", "en-US"]).recognize()
             out.append("\n".join(t[0] for t in res))
         except Exception:
-            pass
-    return "\n\n".join(out).strip()
+            out.append("")
+    return out
 
-def _ocr_images(paths):
-    """Dispatcher OCR: 'local' = GLM-OCR in-process (self-contained); 'omlx'/'paranoid' = router
-    oMLX esterno; default Apple Vision. Tutti con fallback ad Apple Vision in caso di problemi."""
+def _ocr_pages(paths, cancel=None):
+    """Dispatcher OCR per-pagina: 'local' = GLM-OCR in-process (self-contained); 'omlx'/'paranoid'
+    = router oMLX esterno; default Apple Vision. Fallback ad Apple Vision in caso di problemi.
+    L'annullamento (cancel) NON attiva il fallback: si propaga."""
     if OCR_ENGINE == "local":
         try:
-            txt = _ocr_images_local(paths)
-            if txt.strip():
+            pages = _ocr_pages_local(paths, cancel)
+            if any((t or "").strip() for t in pages):
                 print("OCR locale in-process (GLM-OCR)", flush=True)
-                return txt
+                return pages
             print("OCR locale vuoto → fallback Apple Vision", flush=True)
         except Exception as e:
+            if CANCEL_MSG in str(e): raise
             print("OCR locale fallito → fallback Apple Vision:", e, flush=True)
     elif OCR_ENGINE in ("omlx", "paranoid"):
         try:
-            txt = _ocr_images_omlx(paths, paranoid=(OCR_ENGINE == "paranoid"))
-            if txt.strip():
+            pages = _ocr_pages_omlx(paths, paranoid=(OCR_ENGINE == "paranoid"), cancel=cancel)
+            if any((t or "").strip() for t in pages):
                 print(f"OCR via router oMLX ({OCR_ENGINE})", flush=True)
-                return txt
+                return pages
             print("OCR oMLX vuoto → fallback Apple Vision", flush=True)
         except Exception as e:
+            if CANCEL_MSG in str(e): raise
             print("OCR oMLX non raggiungibile → fallback Apple Vision:", e, flush=True)
-    return _ocr_images_apple(paths)
+    return _ocr_pages_apple(paths, cancel)
 
-def ingest_file(name, data):
+def _ingest_put(fid, entry):
+    """Registra un allegato. Passa dal lock come l'eviction: INGEST_LOCK dichiara di proteggere
+    INGEST, ma le scritture lo bypassavano (ingest concorrenti da più chip in parallelo)."""
+    with INGEST_LOCK:
+        INGEST[fid] = entry
+    return entry
+
+def _evict_ingest():
+    """Cap memoria: scarta le voci più vecchie E i loro file su disco (niente leak in UPLOAD_DIR)."""
+    with INGEST_LOCK:
+        if len(INGEST) <= 24: return
+        for k in list(INGEST)[:len(INGEST) - 24]:
+            old = INGEST.pop(k, None)
+            for p in (old or {}).get("paths") or []:
+                try: os.remove(p)
+                except Exception: pass
+
+def _rm_files(paths):
+    for p in paths:
+        try: os.remove(p)
+        except Exception: pass
+
+def _ingest_pdf(fid, name, data, cancel=None):
+    """PDF: testo digitale per pagina; le pagine SENZA testo (scansioni) passano dall'OCR — anche
+    nei PDF misti (testo + scansioni), ricucite in ordine. L'OCR copre al massimo
+    MAX_PDF_RENDER_PAGES pagine: oltre, il taglio è dichiarato (nota nel testo + campi nella
+    risposta), mai silenzioso."""
+    from pypdf import PdfReader
+    reader = PdfReader(io.BytesIO(data))
+    if len(reader.pages) > MAX_PDF_PAGES:
+        raise ValueError(f"PDF con troppe pagine ({len(reader.pages)}).")
+    ptexts = [(p.extract_text() or "") for p in reader.pages]
+    scanned = [i for i, t in enumerate(ptexts) if len(t.strip()) < 25]  # pagina senza testo digitale utile
+    digital = "\n\n".join(t.strip() for t in ptexts if t.strip()).strip()
+    if not scanned:
+        if not digital: raise ValueError("PDF vuoto o non leggibile.")
+        e = _ingest_put(fid, {"kind": "doc", "name": name, "text": digital, "tokens": count_tokens(digital)})
+        return {"id": fid, "kind": "doc", "name": name, "tokens": e["tokens"], "chars": len(digital)}
+    ocr_idx = scanned[:MAX_PDF_RENDER_PAGES]
+    note = ""
+    if len(scanned) > MAX_PDF_RENDER_PAGES:
+        note = (f"\n\n[Nota: {len(scanned)} pagine di questo PDF sono scansionate; l'OCR ha letto "
+                f"solo le prime {len(ocr_idx)}. Le altre {len(scanned) - len(ocr_idx)} non sono incluse.]")
+    paths = _render_pdf_to_images(fid, data, ocr_idx)
+    pages = []
+    try:
+        pages = _ocr_pages(paths, cancel) if paths else []
+    except Exception as e:
+        if CANCEL_MSG in str(e):
+            _rm_files(paths); raise
+        pages = []  # OCR fallito: prosegui con l'eventuale testo digitale
+    ocr_map = {i: (t or "") for i, t in zip(ocr_idx, pages)}
+    got_ocr = sum(len(t.strip()) for t in ocr_map.values()) >= 8
+    if not digital and not got_ocr:
+        # solo scansioni e OCR vuoto (es. solo foto/grafica): usa la vision sulle immagini
+        _ingest_put(fid, {"kind": "image", "name": name, "paths": paths})
+        return {"id": fid, "kind": "image", "name": name, "pages": len(paths)}
+    _rm_files(paths)  # testo ottenuto: le immagini non servono più
+    scanned_set = set(scanned)
+    parts = []
+    for i, t in enumerate(ptexts):
+        if ocr_map.get(i, "").strip():
+            parts.append(ocr_map[i].strip())
+        elif i in scanned_set and digital:  # PDF misto: segnala il buco al posto giusto
+            parts.append(f"[pagina {i + 1}: scansionata, testo non letto]")
+        elif t.strip():
+            parts.append(t.strip())
+    text = "\n\n".join(parts).strip() + note
+    e = _ingest_put(fid, {"kind": "doc", "name": name, "text": text, "tokens": count_tokens(text), "ocr": True})
+    out = {"id": fid, "kind": "doc", "name": name, "tokens": e["tokens"], "chars": len(text), "ocr": True}
+    if len(scanned) > MAX_PDF_RENDER_PAGES:
+        out["ocr_pages"] = len(ocr_idx); out["scanned_pages"] = len(scanned)
+    return out
+
+def ingest_file(name, data, cancel=None):
     fid = uuid.uuid4().hex[:12]
     ext = os.path.splitext(name)[1].lower()
-    if len(INGEST) > 24:  # cap memoria: scarta i più vecchi
-        for k in list(INGEST)[:len(INGEST) - 24]: INGEST.pop(k, None)
+    _evict_ingest()
     if ext in IMG_EXT:
         os.makedirs(UPLOAD_DIR, exist_ok=True)
         path = os.path.join(UPLOAD_DIR, fid + ext)
         with open(path, "wb") as f: f.write(data)
-        INGEST[fid] = {"kind": "image", "name": name, "paths": [path]}
+        _ingest_put(fid, {"kind": "image", "name": name, "paths": [path]})
         return {"id": fid, "kind": "image", "name": name}
     if ext == ".pdf":
-        text = _extract_text(name, data)
-        if text.strip():
-            INGEST[fid] = {"kind": "doc", "name": name, "text": text, "tokens": count_tokens(text)}
-            return {"id": fid, "kind": "doc", "name": name, "tokens": INGEST[fid]["tokens"], "chars": len(text)}
-        # PDF scansionato (nessun testo digitale): rendi le pagine in immagini
-        paths = _render_pdf_to_images(fid, data)
-        if not paths: raise ValueError("PDF vuoto o non leggibile.")
-        ocr = _ocr_images(paths)  # OCR nativo Apple Vision: prova a estrarre testo (economico, riusabile)
-        if len(ocr) >= 8:
-            for p in paths:  # testo ottenuto: non servono più le immagini
-                try: os.remove(p)
-                except Exception: pass
-            INGEST[fid] = {"kind": "doc", "name": name, "text": ocr, "tokens": count_tokens(ocr), "ocr": True}
-            return {"id": fid, "kind": "doc", "name": name, "tokens": INGEST[fid]["tokens"], "chars": len(ocr), "ocr": True}
-        # OCR vuoto (es. solo foto/grafica): usa la vision sulle immagini
-        INGEST[fid] = {"kind": "image", "name": name, "paths": paths}
-        return {"id": fid, "kind": "image", "name": name, "pages": len(paths)}
+        return _ingest_pdf(fid, name, data, cancel)
     text = _extract_text(name, data)
     if not text.strip():
         raise ValueError("Nessun testo estraibile da questo file.")
-    INGEST[fid] = {"kind": "doc", "name": name, "text": text, "tokens": count_tokens(text)}
-    return {"id": fid, "kind": "doc", "name": name, "tokens": INGEST[fid]["tokens"], "chars": len(text)}
+    e = _ingest_put(fid, {"kind": "doc", "name": name, "text": text, "tokens": count_tokens(text)})
+    return {"id": fid, "kind": "doc", "name": name, "tokens": e["tokens"], "chars": len(text)}
 
 def _chunk_by_chars(text, n):
     return [text[i:i + n] for i in range(0, len(text), n)]
@@ -698,6 +801,8 @@ def build_doc_context(doc_ids, on_status, cancel=None):
         key = (i, per)
         if key not in SUMMARY_CACHE:
             SUMMARY_CACHE[key] = map_reduce_summarize(t, per, on_status, cancel)
+            while len(SUMMARY_CACHE) > 32:  # cap: non crescere per sempre (i doc evictati non tornano)
+                SUMMARY_CACHE.pop(next(iter(SUMMARY_CACHE)), None)
         parts.append(f"===== DOCUMENTO: {n} (compresso) =====\n" + SUMMARY_CACHE[key])
     return "\n\n".join(parts)
 
@@ -836,11 +941,81 @@ def list_local_models():
                     out.append({"id": p, "label": pub + "/" + repo + "  (LM Studio)"})
     return out
 
-# ---------- Downloader del modello (primo avvio) ----------
-# È l'UNICO momento in cui Gephid usa la rete: scarica il modello una volta, poi 100% offline.
+# ---------- Downloader del modello ----------
+# Rete usata SOLO qui, e solo su azione esplicita dell'utente: (1) download al primo avvio,
+# (2) "Cerca aggiornamenti" nelle Impostazioni. Mai un controllo automatico all'avvio.
 _DL = {"got": 0, "total": 0, "active": False, "cancel": False}
 _DL_LOCK = threading.Lock()  # rende atomico il check-and-set del download
 _NEEDS_DL = None  # memoizzato: True se il modello non è ancora su disco
+
+import contextlib
+@contextlib.contextmanager
+def _online():
+    """Sospende la modalità offline per il tempo strettamente necessario, poi la ripristina
+    SEMPRE (anche su eccezione). huggingface_hub legge sia l'env sia la costante già importata."""
+    os.environ["HF_HUB_OFFLINE"] = "0"; os.environ["TRANSFORMERS_OFFLINE"] = "0"
+    try:
+        from huggingface_hub import constants as _hc; _hc.HF_HUB_OFFLINE = False
+    except Exception: pass
+    try:
+        yield
+    finally:
+        os.environ["HF_HUB_OFFLINE"] = "1"; os.environ["TRANSFORMERS_OFFLINE"] = "1"
+        try:
+            from huggingface_hub import constants as _hc2; _hc2.HF_HUB_OFFLINE = True
+        except Exception: pass
+
+def _hf_cache_dir(repo):
+    try:
+        from huggingface_hub.constants import HF_HUB_CACHE as _C
+    except Exception:
+        _C = os.path.expanduser("~/.cache/huggingface/hub")
+    return os.path.join(_C, "models--" + repo.replace("/", "--"))
+
+def local_revision(repo):
+    """sha della revisione in cache (refs/main), o None se il modello non viene dall'hub
+    (cartella locale: lì non esiste il concetto di aggiornamento)."""
+    if os.path.isdir(os.path.expanduser(repo)):
+        return None
+    try:
+        with open(os.path.join(_hf_cache_dir(repo), "refs", "main")) as f:
+            return f.read().strip() or None
+    except Exception:
+        return None
+
+def _sibling_oid(s):
+    """oid del file = nome del blob nella cache HF (sha256 per LFS, git blob sha altrimenti)."""
+    lfs = getattr(s, "lfs", None)
+    if isinstance(lfs, dict): oid = lfs.get("sha256")
+    else: oid = getattr(lfs, "sha256", None)
+    return oid or getattr(s, "blob_id", None)
+
+def _missing_files(repo, siblings):
+    """File del repo NON già presenti nel blob-store della cache. La cache HF indirizza per hash:
+    se il blob c'è (anche da un'altra revisione), quel file non va riscaricato. È il motivo per cui
+    un aggiornamento del solo chat_template costa KB e non l'intero modello."""
+    blobs = os.path.join(_hf_cache_dir(repo), "blobs")
+    out = []
+    for s in (siblings or []):
+        oid = _sibling_oid(s)
+        if not oid or not os.path.exists(os.path.join(blobs, oid)):
+            out.append({"path": getattr(s, "rfilename", "?"), "size": getattr(s, "size", 0) or 0})
+    return out
+
+def model_update_info(repo):
+    """Confronta la revisione locale con quella su HuggingFace e dice cosa cambierebbe DAVVERO.
+    Chiamata solo da POST /api/model/check, cioè solo se l'utente preme il pulsante."""
+    if os.path.isdir(os.path.expanduser(repo)):
+        return {"supported": False, "reason": "Il modello è una cartella locale: non ha aggiornamenti."}
+    from huggingface_hub import HfApi
+    with _online():
+        info = HfApi().model_info(repo, files_metadata=True)
+    files = _missing_files(repo, info.siblings)
+    cur = local_revision(repo)
+    return {"supported": True, "current": cur, "latest": info.sha,
+            "up_to_date": bool(cur) and cur == info.sha and not files,
+            "files": files[:20], "n_files": len(files),
+            "bytes": sum(f["size"] for f in files)}
 
 def model_cached(repo):
     """True se il modello è già su disco (cartella locale o cache HF completa)."""
@@ -854,19 +1029,19 @@ def model_cached(repo):
         return False
 
 def download_model_stream(emit):
-    """Scarica MODEL da HuggingFace con progresso (GB/%/velocità). Pausa via _DL['cancel']."""
+    """Scarica MODEL da HuggingFace con progresso (GB/%/velocità). Pausa via _DL['cancel'].
+    Serve sia il primo download sia gli aggiornamenti: snapshot_download prende solo i file
+    mancanti, e il totale è calcolato sul DELTA (non sui 28GB del repo), così la percentuale è
+    veritiera anche quando si aggiorna un solo file o si riprende un download interrotto."""
     import threading, time as _t
-    os.environ["HF_HUB_OFFLINE"] = "0"; os.environ["TRANSFORMERS_OFFLINE"] = "0"
-    try:
-        from huggingface_hub import constants as _hc; _hc.HF_HUB_OFFLINE = False
-    except Exception: pass
     from huggingface_hub import snapshot_download, HfApi
     from huggingface_hub.utils import tqdm as _hf_tqdm
-    try:
-        info = HfApi().model_info(MODEL, files_metadata=True)
-        total = sum((s.size or 0) for s in info.siblings)
-    except Exception:
-        total = 0
+    with _online():
+        try:
+            info = HfApi().model_info(MODEL, files_metadata=True)
+            total = sum(f["size"] for f in _missing_files(MODEL, info.siblings))
+        except Exception:
+            total = 0
     _DL.update(got=0, total=total, active=True, cancel=False)
     class _P(_hf_tqdm):
         def update(self, n=1):
@@ -886,7 +1061,8 @@ def download_model_stream(emit):
                   "pct": min(100, int(g / tot * 100)), "speed": round(speed / 1e6, 1)})
     th = threading.Thread(target=pump, daemon=True); th.start()
     try:
-        snapshot_download(MODEL, tqdm_class=_P)
+        with _online():   # ripristina l'offline anche se snapshot_download esplode
+            snapshot_download(MODEL, tqdm_class=_P)
         emit({"downloaded": True})
     except KeyboardInterrupt:
         emit({"paused": True, "gotGB": round(_DL["got"] / 1e9, 1)})
@@ -894,15 +1070,12 @@ def download_model_stream(emit):
         emit({"error": str(e)[:200]})
     finally:
         stop.set(); _DL["active"] = False
-        os.environ["HF_HUB_OFFLINE"] = "1"; os.environ["TRANSFORMERS_OFFLINE"] = "1"
-        try:
-            from huggingface_hub import constants as _hc2; _hc2.HF_HUB_OFFLINE = True
-        except Exception: pass
 
 def config_payload():
     return {"model": CFG["model"], "loaded_model": MODEL,
+            "model_rev": local_revision(MODEL),  # revisione in cache: la mostra la sezione Modello
             "default_steps": CFG["default_steps"], "default_max_tokens": CFG["default_max_tokens"],
-            "ocr_engine": CFG.get("ocr_engine", "apple"),
+            "ocr_engine": CFG.get("ocr_engine", DEFAULTS["ocr_engine"]),
             "system_prompt": CFG.get("system_prompt", SYS_DEFAULT), "system_prompt_default": SYS_DEFAULT,
             "paths": {"config": CONFIG_PATH, "python": sys.executable,
                       "script": os.path.abspath(__file__),
@@ -916,6 +1089,7 @@ PAGE = r"""<!DOCTYPE html><html lang="it"><head><meta charset="UTF-8">
 <script src="/static/html2pdf.bundle.min.js"></script>
 <link rel="stylesheet" href="/static/katex.min.css">
 <script src="/static/katex.min.js"></script>
+<script src="/static/mhchem.min.js"></script>
 <script src="/static/auto-render.min.js"></script>
 <style>
   [data-theme="dark"]{--bg:#0b0e14;--panel:#141925;--panel2:#1c2333;--text:#e6edf3;--accent:#4169e1;--accent-text:#8ab0ff;--accent-ink:#fff;--dim:#8b98a5;--border:#222b3a;--shadow:rgba(0,0,0,.45);--ubub:#4169e1;--utext:#fff}
@@ -1119,7 +1293,7 @@ Genero il testo "a blocchi" via diffusione. Chiedimi qualcosa!</div>
 
         <h3>Generazione</h3>
         <div class="row"><label>Step di denoising</label><div class="stepper" id="stStep"></div></div>
-        <div class="hint">Più step = testo più pulito ma più lento. Consigliato <b>32</b> (64 per codice/documenti).</div>
+        <div class="hint">Più step = testo più pulito ma più lento. Consigliato <b>48</b> (64 per codice/documenti).</div>
         <div class="row"><label>Max token risposta</label><div class="stepper" id="stTok"></div></div>
         <div class="hint">Lunghezza massima della risposta (1 token ≈ 0,75 parole). Il modello si ferma comunque da solo a fine risposta: un valore alto serve solo a non troncare.</div>
 
@@ -1152,7 +1326,7 @@ Genero il testo "a blocchi" via diffusione. Chiedimi qualcosa!</div>
   function scrollDown(){if(stick)chat.scrollTo(0,chat.scrollHeight);}
   let history=[];
   let attachments=[]; // allegati in attesa di invio: {id,kind,name,tokens,thumb}
-  let curSteps=32,curMaxTok=32768; // valori effettivi (modificabili solo da Impostazioni)
+  let curSteps=48,curMaxTok=32768; // valori effettivi (modificabili solo da Impostazioni); allineati ai default del backend
   let busy=false; // anti doppio-invio (fix: Enter mentre una richiesta è in corso)
   let modelReady=false; // false finché /api/health non dice model_ok: composer disabilitato + overlay
   let recording=false,dictBase='',dictTimer=null; // dettatura vocale
@@ -1166,8 +1340,32 @@ Genero il testo "a blocchi" via diffusione. Chiedimi qualcosa!</div>
     inp.value='';inp.style.height='auto';inp.focus();stick=true;updateSendState();
   }
   function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+  // marked tratta \( \) \[ \] come escape markdown e ne emette solo ( ) [ ]: quei delimitatori LaTeX
+  // non arrivavano mai a KaTeX. Raddoppiando il backslash marked ne emette uno letterale e
+  // auto-render li riconosce. Dentro il codice (fence ``` e span `…`) non si tocca nulla.
+  function mathEscape(src){
+    if(!src||src.indexOf('\\')<0)return src;
+    return String(src).split(/(```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)|`[^`\n]*`)/g)
+      .map(function(seg,i){return i%2?seg:seg.replace(/\\([[\]()])/g,'\\\\$1');}).join('');
+  }
   // Renderizza markdown solo se marked+DOMPurify sono entrambi presenti; altrimenti testo grezzo (fail-safe).
-  function safeHtml(text){return (window.marked&&window.DOMPurify)?DOMPurify.sanitize(marked.parse(text)):null;}
+  function safeHtml(text){return (window.marked&&window.DOMPurify)?DOMPurify.sanitize(marked.parse(mathEscape(text))):null;}
+  // Anti-esfiltrazione: l'output del modello è untrusted (prompt injection nei documenti).
+  // Nel markdown reso niente risorse né link esterni: src/href devono restare locali (oltre alla CSP).
+  if(window.DOMPurify){DOMPurify.addHook('afterSanitizeAttributes',function(n){
+    if(n.hasAttribute('src')&&!/^(\/|data:image\/)/.test(n.getAttribute('src')||''))n.removeAttribute('src');
+    if(n.hasAttribute('srcset'))n.removeAttribute('srcset');
+    if(n.hasAttribute('href')){var h=n.getAttribute('href')||'';if(!/^(#|\/(?!\/))/.test(h)){n.setAttribute('data-blocked-href',h);n.removeAttribute('href');}}
+  });}
+  // Un link esterno cliccato navigherebbe la WKWebView fuori dall'app (e senza "indietro"): blocca.
+  document.addEventListener('click',function(e){var a=e.target.closest&&e.target.closest('a');if(!a)return;
+    var h=a.getAttribute('href')||a.getAttribute('data-blocked-href')||'';
+    if(/^(#|\/(?!\/))/.test(h))return;
+    e.preventDefault();e.stopPropagation();
+    if(h)addError('Link esterno bloccato (Gephid è offline): '+h.slice(0,120));
+  },true);
+  // drop di file/URL: senza preventDefault la webview navigherebbe via dalla UI
+  ['dragover','drop'].forEach(function(ev){document.addEventListener(ev,function(e){e.preventDefault();});});
 
   // ---- TEMA: system/light/dark, default system ----
   const mq=window.matchMedia('(prefers-color-scheme: dark)');
@@ -1214,6 +1412,7 @@ Genero il testo "a blocchi" via diffusione. Chiedimi qualcosa!</div>
   let cfgReady=false;
   const stStep=makeStepper($('stStep'),16,64,4,v=>{curSteps=v;if(cfgReady)saveCfg();});
   const stTok=makeStepper($('stTok'),2048,32768,2048,v=>{curMaxTok=v;if(cfgReady)saveCfg();});
+  stStep.set(curSteps);stTok.set(curMaxTok); // display allineato ai default anche se /api/config non risponde
   async function loadConfig(){
     try{const c=await(await fetch('/api/config')).json();
       curSteps=c.default_steps;curMaxTok=c.default_max_tokens;
@@ -1362,6 +1561,7 @@ Genero il testo "a blocchi" via diffusione. Chiedimi qualcosa!</div>
     const m=inp.value.trim();
     const atts=attachments.filter(a=>a.id);
     if(!m&&!atts.length)return;
+    const usedSteps=curSteps; // gli step di QUESTO messaggio (la telemetria non deve cambiare se l'utente li modifica dopo)
     if(compactSuggest){compactSuggest.remove();compactSuggest=null;}
     busy=true;inp.value='';inp.style.height='auto';setStopMode(true);
     if(recording){dictBase='';if(window.gephidDictReset)gephidDictReset();} // svuota la trascrizione (mic resta attivo per il prossimo)
@@ -1401,7 +1601,7 @@ Genero il testo "a blocchi" via diffusione. Chiedimi qualcosa!</div>
         addError('(nessuna risposta dal modello — riprova, o alza step/token)');
       }else{
         if(!dmsg)dmsg=add('assistant',acc);
-        else{await typer.finish();if(tps){const s=document.createElement('span');s.className='tps';s.textContent=tps+' tok/s · '+curSteps+' step';dmsg.appendChild(s);}msgButtons(dmsg,'assistant',acc);}
+        else{await typer.finish();if(tps){const s=document.createElement('span');s.className='tps';s.textContent=tps+' tok/s · '+usedSteps+' step';dmsg.appendChild(s);}msgButtons(dmsg,'assistant',acc);}
         history.push({role:'assistant',content:acc});addCompactSuggest();
       }
     }finally{
@@ -1444,19 +1644,22 @@ Genero il testo "a blocchi" via diffusione. Chiedimi qualcosa!</div>
         const t=document.createElement('span');t.className='tk';t.textContent=a.tokens+' tok';ch.appendChild(t);
       }
       const x=document.createElement('span');x.className='x';x.textContent='×';x.title=a.loading?'Annulla lettura':'Rimuovi';
-      x.onclick=()=>{if(a.loading&&a._ctrl){try{a._ctrl.abort();}catch(e){}}attachments=attachments.filter(z=>z!==a);renderChips();};ch.appendChild(x);
+      x.onclick=()=>{if(a.loading){if(a._ctrl){try{a._ctrl.abort();}catch(e){}}
+        if(a._tok)fetch('/api/ingest/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:a._tok})}).catch(()=>{});} // ferma anche l'OCR lato server
+        attachments=attachments.filter(z=>z!==a);renderChips();};ch.appendChild(x);
       c.appendChild(ch);
     });
     updateSendState();
   }
+  function cancelToken(){return (window.crypto&&crypto.randomUUID)?crypto.randomUUID():('t'+Date.now()+Math.round(Math.random()*1e9));}
   async function ingestPath(path){
     const name=path.split('/').pop();
     const isImg=/\.(png|jpe?g|gif|webp|bmp|heic|tiff)$/i.test(name);
-    const ph={id:null,kind:isImg?'image':'doc',name:name,tokens:0,loading:true,thumb:null,t0:Date.now(),_ctrl:null};
+    const ph={id:null,kind:isImg?'image':'doc',name:name,tokens:0,loading:true,thumb:null,t0:Date.now(),_ctrl:null,_tok:cancelToken()};
     try{ph._ctrl=new AbortController();}catch(e){}
     attachments.push(ph);renderChips();
     try{
-      const r=await(await fetch('/api/ingest',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:path}),signal:ph._ctrl&&ph._ctrl.signal})).json();
+      const r=await(await fetch('/api/ingest',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:path,cancel_token:ph._tok}),signal:ph._ctrl&&ph._ctrl.signal})).json();
       if(r.error){attachments=attachments.filter(z=>z!==ph);addError('Errore allegato "'+name+'": '+r.error);}
       else{ph.id=r.id;ph.kind=r.kind;ph.tokens=r.tokens||0;ph.loading=false;ph._justReady=true;}
       renderChips();
@@ -1474,11 +1677,11 @@ Genero il testo "a blocchi" via diffusione. Chiedimi qualcosa!</div>
     for(const f of files){
       const isImg=(f.type||'').startsWith('image/');
       let b64;try{b64=await fileToB64(f);}catch(err){continue;}
-      const ph={id:null,kind:isImg?'image':'doc',name:f.name,tokens:0,loading:true,thumb:isImg?('data:'+(f.type||'image/png')+';base64,'+b64):null,t0:Date.now(),_ctrl:null};
+      const ph={id:null,kind:isImg?'image':'doc',name:f.name,tokens:0,loading:true,thumb:isImg?('data:'+(f.type||'image/png')+';base64,'+b64):null,t0:Date.now(),_ctrl:null,_tok:cancelToken()};
       try{ph._ctrl=new AbortController();}catch(e){}
       attachments.push(ph);renderChips();
       try{
-        const r=await(await fetch('/api/ingest',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:f.name,content:b64}),signal:ph._ctrl&&ph._ctrl.signal})).json();
+        const r=await(await fetch('/api/ingest',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:f.name,content:b64,cancel_token:ph._tok}),signal:ph._ctrl&&ph._ctrl.signal})).json();
         if(r.error){attachments=attachments.filter(z=>z!==ph);addError('Errore allegato "'+f.name+'": '+r.error);}
         else{ph.id=r.id;ph.kind=r.kind;ph.tokens=r.tokens||0;ph.loading=false;ph._justReady=true;}
         renderChips();
@@ -1500,6 +1703,7 @@ Genero il testo "a blocchi" via diffusione. Chiedimi qualcosa!</div>
     if(recording){await stopDict();return;}
     inp.focus();
     let r;try{r=await gephidDictStart();}catch(e){r=-1;}
+    if(r===-3){addError('Concedi i permessi appena richiesti (Microfono e Riconoscimento vocale), poi ripremi il microfono.');return;}
     if(r<0){add('assistant','Dettatura on-device non disponibile. Attiva la Dettatura italiana (anche "on device") in Impostazioni di Sistema → Tastiera → Dettatura, e concedi Microfono e Riconoscimento vocale a Gephid.');return;}
     recording=true;$('mic').classList.add('rec');$('mic').setAttribute('aria-pressed','true');
     dictBase=inp.value?(inp.value.replace(/\s*$/,'')+' '):'';
@@ -1522,7 +1726,7 @@ Genero il testo "a blocchi" via diffusione. Chiedimi qualcosa!</div>
     if(window.gephidSaveFile){
       let path='';try{path=await gephidSaveFile(defName);}catch(e){}
       if(!path)return {cancelled:true};
-      try{return await(await fetch('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:path,content:content,b64:!!b64})})).json();}
+      try{return await(await fetch('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:path,filename:defName,content:content,b64:!!b64})})).json();}
       catch(e){return {ok:false,error:String(e)};}
     }
     return await saveToDownloads(defName,content,b64);
@@ -1671,9 +1875,9 @@ LOGO_SVG = '''<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" styl
 
 FULL_PAGE = PAGE.replace("__LOGO__", LOGO_SVG)  # precompilata una volta (il logo è costante)
 
-# Redesign "Terminale × Cifra": la nuova UI vive in page.html accanto a questo file.
-# Servita su /new finché non è completa; poi diventerà la "/" di default. Caricata a ogni
-# richiesta in dev (così posso iterare senza riavviare); in bundle è statica.
+# Redesign "Terminale × Cifra": la UI di default vive in page.html accanto a questo file, servita
+# su / e su /new (la vecchia UI inline resta su /old). Riletta da disco quando il file cambia
+# (hot-reload in dev, così si itera senza riavviare); in bundle il file è statico.
 _PAGE_CACHE = {"mtime": None, "html": None}
 def _load_new_page():
     try:
@@ -1687,6 +1891,12 @@ def _load_new_page():
     except Exception as e:
         return "<!doctype html><meta charset=utf-8><body style='font-family:monospace;padding:40px'>page.html non trovata: " + str(e) + "</body>"
 
+# CSP: l'output del modello è untrusted (prompt injection nei documenti allegati). Il markdown
+# reso non deve poter caricare risorse esterne (esfiltrazione via <img src>): tutto resta 'self'.
+# 'unsafe-inline' serve perché l'intera UI (script e stili) è inline nella pagina.
+CSP = ("default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+       "img-src 'self' data:; font-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'")
+
 class H(http.server.BaseHTTPRequestHandler):
     timeout = 120  # un client lento/bloccato non tiene occupato il thread per sempre
     def log_message(self, *a): pass
@@ -1694,6 +1904,7 @@ class H(http.server.BaseHTTPRequestHandler):
         b = body.encode() if isinstance(body, str) else body
         self.send_response(code); self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", len(b))
+        self.send_header("X-Content-Type-Options", "nosniff")
         for k, v in (extra or {}).items(): self.send_header(k, v)
         self.end_headers(); self.wfile.write(b)
     def do_GET(self):
@@ -1701,9 +1912,9 @@ class H(http.server.BaseHTTPRequestHandler):
         if host not in ("localhost", "127.0.0.1"):
             self._send(403, "forbidden", "text/plain"); return
         if self.path == "/" or self.path == "/new":  # nuova UI "Terminale × Cifra" (default)
-            self._send(200, _load_new_page(), "text/html; charset=utf-8")
+            self._send(200, _load_new_page(), "text/html; charset=utf-8", {"Content-Security-Policy": CSP})
         elif self.path == "/old":  # vecchia UI, fallback durante la transizione
-            self._send(200, FULL_PAGE, "text/html; charset=utf-8")
+            self._send(200, FULL_PAGE, "text/html; charset=utf-8", {"Content-Security-Policy": CSP})
         elif self.path == "/api/config":
             self._send(200, json.dumps(config_payload()))
         elif self.path == "/api/health":
@@ -1838,8 +2049,18 @@ class H(http.server.BaseHTTPRequestHandler):
                      "- Vai DRITTO ai contenuti: solo fatti concreti, dati/numeri, decisioni prese, stato attuale e prossimo passo.\n"
                      "- Usa elenchi puntati brevi se utile. Massima densità, minimo testo.\n"
                      "Restituisci solo il prompt pronto da incollare."}
-            cmsgs = req.get("messages", []) + [instr]
+            base_msgs = _clean(req.get("messages", []))
             def cwork(job):
+                cmsgs = base_msgs + [instr]
+                # guard GPU: la compattazione serve PROPRIO sulle chat lunghe, che sono quelle che
+                # sforano il buffer (~seq^2). Se il prompt eccede, appiattisci in trascrizione e
+                # tieni testa+coda entro il tetto invece di fallire con l'OOM.
+                cap = max(4096, SAFE_SEQ - 2500)
+                if _ntok(cmsgs) > cap:
+                    job.q.put(("status", "conversazione molto lunga: uso le porzioni principali…"))
+                    tr = "\n".join((("Utente: " if m["role"] == "user" else "Assistente: ") + m["content"]) for m in base_msgs)
+                    tr = _truncate_head_tail(tr, cap - 500)
+                    cmsgs = [{"role": "user", "content": tr + "\n\n" + instr["content"]}]
                 def on_delta(d):
                     if job.cancel.is_set(): return False
                     job.q.put(("delta", d)); return True
@@ -1850,6 +2071,14 @@ class H(http.server.BaseHTTPRequestHandler):
             # Riceve un file via path (file picker nativo) o base64 (fallback) -> immagine/documento.
             if not MODEL_OK:  # senza tokenizer il conteggio token sarebbe solo una stima caratteri/4
                 self._send(200, json.dumps({"error": "Il modello si sta ancora caricando, attendi qualche secondo e riprova."})); return
+            # cancel_token: la × sul chip annulla l'OCR anche lato server (non solo l'HTTP del client)
+            tok = str(req.get("cancel_token") or "")[:64]
+            cancel = None
+            if tok:
+                cancel = threading.Event()
+                with INGEST_LOCK:
+                    while len(INGEST_CANCELS) > 32: INGEST_CANCELS.pop(next(iter(INGEST_CANCELS)), None)
+                    INGEST_CANCELS[tok] = cancel
             try:
                 p = req.get("path")
                 if p:
@@ -1860,23 +2089,43 @@ class H(http.server.BaseHTTPRequestHandler):
                 else:
                     fname = os.path.basename(str(req.get("filename") or "file"))
                     data = base64.b64decode(req.get("content") or "")
-                self._send(200, json.dumps(ingest_file(fname, data)))
+                self._send(200, json.dumps(ingest_file(fname, data, cancel)))
             except Exception as e:
                 self._send(200, json.dumps({"error": str(e)[:200]}))
+            finally:
+                if tok:
+                    with INGEST_LOCK: INGEST_CANCELS.pop(tok, None)
+        elif self.path == "/api/ingest/cancel":
+            # Annulla un ingest in corso (identificato dal cancel_token passato a /api/ingest).
+            tok = str(req.get("token") or "")[:64]
+            with INGEST_LOCK: ev = INGEST_CANCELS.get(tok)
+            if ev: ev.set()
+            self._send(200, json.dumps({"ok": bool(ev)}))
         elif self.path == "/api/save":
             content = req.get("content") or ""
-            # WKWebView non sa scaricare via <a download>/blob: salva lato server in ~/Downloads
-            # e rivela il file nel Finder (open -R). Nessuna scrittura su path arbitrari: solo ~/Downloads.
+            # WKWebView non sa scaricare via <a download>/blob: salva lato server. Default: ~/Downloads.
+            # Con "path" (dal pannello di salvataggio nativo, dove l'utente ha scelto posizione e
+            # conferma di sovrascrittura) si salva lì — ma solo dentro la home, mai su path di sistema.
             name = os.path.basename(str(req.get("filename") or "gephid.txt")).lstrip(".") or "gephid.txt"
             try:
-                os.makedirs(DOWNLOADS_DIR, exist_ok=True)
-                path = os.path.join(DOWNLOADS_DIR, name)
-                # difesa extra: il path finale deve restare dentro ~/Downloads
-                if os.path.dirname(os.path.realpath(path)) != os.path.realpath(DOWNLOADS_DIR):
-                    self._send(200, json.dumps({"ok": False, "error": "Nome file non valido."})); return
-                if os.path.exists(path):  # non sovrascrivere: aggiungi suffisso
-                    base, ex = os.path.splitext(name)
-                    path = os.path.join(DOWNLOADS_DIR, base + "-" + uuid.uuid4().hex[:6] + ex)
+                target = req.get("path")
+                if target:
+                    target = os.path.realpath(os.path.expanduser(str(target)))
+                    home = os.path.realpath(os.path.expanduser("~"))
+                    if target == home or not target.startswith(home + os.sep):
+                        self._send(200, json.dumps({"ok": False, "error": "Percorso non consentito (solo dentro la home)."})); return
+                    if not os.path.isdir(os.path.dirname(target)):
+                        self._send(200, json.dumps({"ok": False, "error": "Cartella di destinazione inesistente."})); return
+                    path = target  # sovrascrittura consapevole: il pannello nativo l'ha già chiesta
+                else:
+                    os.makedirs(DOWNLOADS_DIR, exist_ok=True)
+                    path = os.path.join(DOWNLOADS_DIR, name)
+                    # difesa extra: il path finale deve restare dentro ~/Downloads
+                    if os.path.dirname(os.path.realpath(path)) != os.path.realpath(DOWNLOADS_DIR):
+                        self._send(200, json.dumps({"ok": False, "error": "Nome file non valido."})); return
+                    if os.path.exists(path):  # non sovrascrivere: aggiungi suffisso
+                        base, ex = os.path.splitext(name)
+                        path = os.path.join(DOWNLOADS_DIR, base + "-" + uuid.uuid4().hex[:6] + ex)
                 if req.get("pdf"):
                     with open(path, "wb") as f: f.write(_html_to_pdf(content, req.get("footer") or ""))
                 elif req.get("b64"):
@@ -1913,7 +2162,7 @@ class H(http.server.BaseHTTPRequestHandler):
         elif self.path == "/api/config":
             CFG["default_steps"] = _coerce_int(req.get("default_steps"), STEP_MIN, STEP_MAX, CFG["default_steps"])
             CFG["default_max_tokens"] = _coerce_int(req.get("default_max_tokens"), TOK_MIN, TOK_MAX, CFG["default_max_tokens"])
-            oe = str(req.get("ocr_engine", CFG.get("ocr_engine", "apple"))).lower()
+            oe = str(req.get("ocr_engine", CFG.get("ocr_engine", DEFAULTS["ocr_engine"]))).lower()
             if oe in ("apple", "local", "omlx", "paranoid"):
                 CFG["ocr_engine"] = oe
                 globals()["OCR_ENGINE"] = oe   # effetto immediato sui prossimi ingest, senza riavvio
@@ -1944,6 +2193,14 @@ class H(http.server.BaseHTTPRequestHandler):
                 if not already:  # se l'ho attivato io, garantisco il reset anche se download_model_stream è esploso prima del suo finally
                     with _DL_LOCK: _DL["active"] = False
             global _NEEDS_DL; _NEEDS_DL = not model_cached(MODEL)
+        elif self.path == "/api/model/check":
+            # Cerca aggiornamenti del modello. Tocca la rete SOLO qui e solo perché l'utente ha
+            # premuto il pulsante: nessun controllo automatico all'avvio (l'app resta offline
+            # per default). Risponde con cosa cambierebbe davvero, in file e byte.
+            try:
+                self._send(200, json.dumps(model_update_info(MODEL)))
+            except Exception as e:
+                self._send(200, json.dumps({"supported": True, "error": str(e)[:200]}))
         elif self.path == "/api/download/pause":
             _DL["cancel"] = True
             self._send(200, json.dumps({"ok": True}))
@@ -1958,7 +2215,7 @@ class GephidServer(http.server.ThreadingHTTPServer):
     allow_reuse_address = True  # esplicito: al restart (supervisione del launcher) il bind sulla porta non deve fallire
 
 IS_BUNDLED = ".app/Contents/Resources" in os.path.realpath(__file__)  # True solo dentro la .app
-BUILD = "2026-06-25e"  # marker di build: compare in ~/gephid-backend.log per verificare la versione in uso
+BUILD = "2026-07-26a"  # marker di build: compare in ~/gephid-backend.log per verificare la versione in uso
 
 def _launcher_watchdog():
     """Spegne il backend quando il launcher che lo ha avviato (il processo PADRE) muore:
@@ -1982,6 +2239,8 @@ def _launcher_watchdog():
         os._exit(0)
 
 if __name__ == "__main__":
+    import shutil
+    shutil.rmtree(UPLOAD_DIR, ignore_errors=True)  # upload orfani di sessioni precedenti
     srv = GephidServer(("127.0.0.1", PORT), H)  # solo loopback
     # Server HTTP su thread daemon; il main thread carica il modello e poi fa da worker.
     # MLX richiede che le ops del modello girino sul thread che ha caricato i pesi.

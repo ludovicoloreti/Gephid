@@ -19,7 +19,7 @@ Gephid/
 │   ├── backend/
 │   │   ├── diffuchat.py       # backend: HTTP server + model
 │   │   ├── page.html         # UI (HTML/CSS/JS), served from disk on every request
-│   │   └── static/           # vendored libraries: marked, DOMPurify, html2pdf, KaTeX + fonts
+│   │   └── static/           # vendored libraries: marked, DOMPurify, html2pdf, KaTeX (+ mhchem) + fonts
 │   └── launcher/
 │       ├── main.go           # Go shell + WKWebView + cgo (menu, file/save panel, dictation)
 │       └── go.mod go.sum logo.svg
@@ -72,23 +72,33 @@ Gephid/
   `mlx-community/diffusiongemma-26B-A4B-it-8bit` (~28GB).
 
 ## API (on 127.0.0.1:8890)
-`GET /` UI · `GET /api/health` · `GET /api/models` · `GET /api/config` · `GET /static/...` ·
-`POST /api/chat` (NDJSON streaming, `attach`=image/doc ids) · `POST /api/compact` (streaming) ·
-`POST /api/ingest` (file→image/doc, OCR for scanned PDFs) · `POST /api/save` ·
-`POST /api/config` (steps/maxtok, immediate effect) · `POST /api/reload` (hot model reload).
+`GET /` UI · `GET /old` legacy UI · `GET /api/health` · `GET /api/models` · `GET /api/config` ·
+`GET /static/...` · `POST /api/chat` (NDJSON streaming, `attach`=image/doc ids) · `POST /api/compact`
+(streaming) · `POST /api/ingest` (file→image/doc, OCR for scanned pages — also in mixed PDFs;
+`cancel_token` to abort) · `POST /api/ingest/cancel` · `POST /api/save` (`~/Downloads` by default;
+`path` from the native panel, home-only) · `POST /api/config` (steps/maxtok/ocr/pre-prompt, immediate
+effect) · `POST /api/reload` (hot model reload) · `POST /api/download` (downloads/updates the model;
+the reported total is the delta) · `POST /api/download/pause` · `POST /api/model/check` (local
+revision vs HuggingFace).
+
+The network is used **only** by `/api/download` and `/api/model/check`, both on an explicit user
+action: there is no automatic check at startup.
 
 ## Features
 Streaming + stop · per-session memory (window + cumulative summary) · compact to one prompt · export
 MD/TXT/HTML/PDF · markdown + LaTeX/chemistry (KaTeX) · themes · attachments: images (vision),
-documents txt/md/code/PDF/Word/Excel/CSV (extraction + map-reduce for large ones), scanned PDFs via
-Apple Vision OCR with a vision fallback · opt-in on-device dictation.
+documents txt/md/code/PDF/Word/Excel/CSV (extraction + map-reduce for large ones), scanned pages via
+OCR (3 engines: in-process GLM-OCR by default, Apple Vision, oMLX router; vision as last fallback) ·
+opt-in on-device dictation.
 
 ## Build
 `./build.sh` assembles `Gephid.app`; `./build.sh --install` also installs it to /Applications. It
-downloads python-build-standalone, runs `pip install` (mlx-vlm, pypdf, python-docx, openpyxl,
-pymupdf, ocrmac) and the JS libraries, compiles the Go, assembles and signs ad-hoc. Idempotent (it
-reuses an existing Python; to redo from scratch: `rm -rf Gephid.app/Contents/Resources/python`).
-Details in [BUILD.md](BUILD.md).
+downloads python-build-standalone, runs `pip install` with PINNED versions (mlx-vlm, pypdf,
+python-docx, openpyxl, pymupdf, ocrmac) plus the pinned JS libraries, compiles the Go, assembles and
+signs ad-hoc. Two stamp files — `static/.versions` and `Resources/python/.gephid-deps` — make the
+pins effective: a changed pin triggers re-vendoring or a reinstall, an unchanged one skips everything
+(idempotent, ~4s). To redo from scratch:
+`rm -rf Gephid.app/Contents/Resources/python src/backend/static`. Details in [BUILD.md](BUILD.md).
 
 ## Requirements
 macOS Apple Silicon, ~30GB free for the model (in `~/.cache/huggingface/hub`), Go + Xcode CLT to

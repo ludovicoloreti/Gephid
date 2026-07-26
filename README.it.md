@@ -31,7 +31,8 @@ computer.
   - Immagini: il modello le vede (vision).
   - Documenti: txt, md, codice, PDF, Word, Excel, CSV. Il testo viene estratto e conteggiato in
     token; i documenti troppo grandi per la GPU vengono letti a pezzi e riassunti (map-reduce).
-  - PDF scansionati: letti con OCR on-device (Apple Vision), senza rete.
+  - PDF scansionati (anche misti testo+scansione): letti con OCR on-device — GLM-OCR locale di
+    default, Apple Vision o router oMLX selezionabili dalle Impostazioni. Senza rete.
 - **Markdown più formule LaTeX e di chimica** (KaTeX).
 - **Export** di un'intera chat o di un singolo messaggio in MD, TXT, HTML o PDF (salvati in
   `~/Downloads`). PDF e HTML hanno un'intestazione (modello usato, data di export) e un footer su
@@ -71,7 +72,10 @@ rapido e nota su Windows/`.exe`: **[BUILD.it.md](BUILD.it.md)**.
 - Mac **Apple Silicon** (M1 o più recente). I Mac Intel non sono supportati: l'inferenza usa MLX, solo Apple Silicon.
 - **macOS 11** o più recente.
 - **Disco**: circa 30 GB liberi per il modello (sta in `~/.cache/huggingface/hub`).
-- **Internet solo al primo avvio** per scaricare il modello; poi gira tutto offline.
+- **Internet solo al primo avvio** per scaricare il modello; poi gira tutto offline. L'unica altra
+  volta in cui Gephid tocca la rete è se premi tu **Impostazioni → Modello → Cerca aggiornamenti**:
+  ti dice quali file cambierebbero e quanto pesano prima di scaricare qualsiasi cosa. Nessun
+  controllo automatico all'avvio.
 - Per ribuildare dai sorgenti: Go e gli Xcode Command Line Tools.
 
 ### Memoria e quale modello usare
