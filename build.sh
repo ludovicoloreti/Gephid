@@ -17,7 +17,10 @@ MARKEDV="18.0.7"   # versioni JS pinnate: build riproducibile (niente "latest" c
 PURIFYV="3.4.12"
 H2PV="0.10.1"      # html2pdf: lo usa solo la UI legacy /old (la nuova fa il PDF lato server)
 # dipendenze Python pinnate (stesso motivo). Per aggiornare: alza qui e rifai il python embeddato.
-PYDEPS="mlx-vlm==0.6.7 pypdf==6.14.2 python-docx==1.2.0 openpyxl==3.1.5 pymupdf==1.28.0 ocrmac==1.0.1"
+# Aggiornati il 17/08/2026: mlx-vlm 0.6.7→0.6.13 (è la libreria che serve
+# DiffusionGemma, sei versioni di scarto), pypdf 6.14.2→6.16.1, pymupdf 1.28.0→1.28.2.
+# python-docx, openpyxl e ocrmac erano già all'ultima.
+PYDEPS="mlx-vlm==0.6.13 pypdf==6.16.1 python-docx==1.2.0 openpyxl==3.1.5 pymupdf==1.28.2 ocrmac==1.0.1"
 
 echo "==> 1/6  Librerie front-end (vendoring: l'app gira 100% offline)"
 # dl() salta i file già presenti (build idempotente e veloce). Da solo però questo rende i pin
