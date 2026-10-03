@@ -10,17 +10,16 @@ APP="$HERE/Gephid.app"
 MACOS="$APP/Contents/MacOS"
 RESOURCES="$APP/Contents/Resources"
 STATIC="$HERE/src/backend/static"
-PYVER="3.12.13"
-PYTAG="20260718"   # release di astral-sh/python-build-standalone
-KVER="0.18.1"      # KaTeX (+ mhchem, stessa versione)
-MARKEDV="18.0.7"   # versioni JS pinnate: build riproducibile (niente "latest" che cambia sotto i piedi)
-PURIFYV="3.4.12"
-H2PV="0.10.1"      # html2pdf: lo usa solo la UI legacy /old (la nuova fa il PDF lato server)
+PYVER="3.12.15"
+PYTAG="20261003"   # release di astral-sh/python-build-standalone
+KVER="0.19.0"      # KaTeX (+ mhchem, stessa versione)
+MARKEDV="18.0.14"   # versioni JS pinnate: build riproducibile (niente "latest" che cambia sotto i piedi)
+PURIFYV="3.4.16"
+HLJSV="11.12.0"    # highlight.js (bundle "common"): evidenziazione del codice, colori dai token CSS della UI
 # dipendenze Python pinnate (stesso motivo). Per aggiornare: alza qui e rifai il python embeddato.
-# Aggiornati il 17/08/2026: mlx-vlm 0.6.7→0.6.13 (è la libreria che serve
-# DiffusionGemma, sei versioni di scarto), pypdf 6.14.2→6.16.1, pymupdf 1.28.0→1.28.2.
-# python-docx, openpyxl e ocrmac erano già all'ultima.
-PYDEPS="mlx-vlm==0.6.13 pypdf==6.16.1 python-docx==1.2.0 openpyxl==3.1.5 pymupdf==1.28.2 ocrmac==1.0.1"
+# Aggiornati il 04/10/2026: mlx-vlm 0.6.13→0.7.4 (API usate da Gephid invariate, verificato dal vivo),
+# pypdf 6.16.1→6.19.0. python-docx, openpyxl, pymupdf e ocrmac erano già all'ultima.
+PYDEPS="mlx-vlm==0.7.4 pypdf==6.19.0 python-docx==1.2.0 openpyxl==3.1.5 pymupdf==1.28.2 ocrmac==1.0.1"
 
 echo "==> 1/6  Librerie front-end (vendoring: l'app gira 100% offline)"
 # dl() salta i file già presenti (build idempotente e veloce). Da solo però questo rende i pin
@@ -28,7 +27,7 @@ echo "==> 1/6  Librerie front-end (vendoring: l'app gira 100% offline)"
 # Lo stamp registra le versioni vendorizzate: se un pin cambia, si ri-vendorizza da zero
 # (i font KaTeX sono legati alla versione, quindi va buttata tutta la cartella, non i singoli file).
 STAMP="$STATIC/.versions"
-WANT="marked=$MARKEDV purify=$PURIFYV katex=$KVER html2pdf=$H2PV"
+WANT="marked=$MARKEDV purify=$PURIFYV katex=$KVER hljs=$HLJSV"
 if [ ! -f "$STAMP" ] || [ "$(cat "$STAMP")" != "$WANT" ]; then
   [ -f "$STAMP" ] && echo "    pin cambiati -> ri-scarico le librerie JS"
   rm -rf "$STATIC"
@@ -40,7 +39,7 @@ dl(){ [ -f "$2" ] || { echo "    scarico $(basename "$2")"; curl -fsSL -o "$2.pa
 # marked >= 16 non pubblica più marked.min.js nel root del pacchetto: l'UMD sta in lib/.
 dl "https://cdn.jsdelivr.net/npm/marked@$MARKEDV/lib/marked.umd.js"                 "$STATIC/marked.min.js"
 dl "https://cdn.jsdelivr.net/npm/dompurify@$PURIFYV/dist/purify.min.js"             "$STATIC/purify.min.js"
-dl "https://cdn.jsdelivr.net/npm/html2pdf.js@$H2PV/dist/html2pdf.bundle.min.js"     "$STATIC/html2pdf.bundle.min.js"
+dl "https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@$HLJSV/highlight.min.js"  "$STATIC/highlight.min.js"
 dl "https://cdn.jsdelivr.net/npm/katex@$KVER/dist/katex.min.css"                    "$STATIC/katex.min.css"
 dl "https://cdn.jsdelivr.net/npm/katex@$KVER/dist/katex.min.js"                     "$STATIC/katex.min.js"
 dl "https://cdn.jsdelivr.net/npm/katex@$KVER/dist/contrib/auto-render.min.js"       "$STATIC/auto-render.min.js"
@@ -89,8 +88,10 @@ echo "==> 3/6  Build del launcher Go (cgo / Cocoa+Speech+AVFoundation)"
 echo "==> 4/6  Assemblo il bundle .app"
 mkdir -p "$MACOS" "$RESOURCES"
 cp /tmp/Gephid "$MACOS/Gephid"; chmod +x "$MACOS/Gephid"
-cp "$HERE/src/backend/diffuchat.py" "$RESOURCES/diffuchat.py"
-cp "$HERE/src/backend/page.html" "$RESOURCES/page.html"  # UI di default (servita su / e /new)
+cp "$HERE"/src/backend/*.py "$RESOURCES/"               # diffuchat.py + moduli (channels, store, agent)
+cp "$HERE/src/backend/page.html" "$RESOURCES/page.html"  # UI (servita su /)
+# etichetta di build: compare in ~/Library/Logs/Gephid/backend.log per sapere quale versione gira
+printf '%s' "$(date +%Y-%m-%d.%H%M) $(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo nogit)" > "$RESOURCES/build-info"
 rm -rf "$RESOURCES/static"; cp -R "$STATIC" "$RESOURCES/static"
 [ -f "$HERE/assets/icon.icns" ] && cp "$HERE/assets/icon.icns" "$RESOURCES/icon.icns" || true
 cat > "$APP/Contents/Info.plist" <<'PLIST'
@@ -103,8 +104,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleIdentifier</key><string>pro.lloreti.gephid</string>
   <key>CFBundleIconFile</key><string>icon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleVersion</key><string>1.6</string>
-  <key>CFBundleShortVersionString</key><string>1.6</string>
+  <key>CFBundleVersion</key><string>2.0</string>
+  <key>CFBundleShortVersionString</key><string>2.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>LSMinimumSystemVersion</key><string>11.0</string>
   <key>NSMicrophoneUsageDescription</key><string>Gephid usa il microfono per la dettatura vocale offline.</string>

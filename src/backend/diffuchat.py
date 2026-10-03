@@ -2,7 +2,7 @@
 """
 diffuchat — chat web per Gephid (text diffusion, MLX).
 Avvio (nel venv mlx-vlm):  ~/.venv-mlxvlm/bin/python src/backend/diffuchat.py
-UI: page.html su / (default), vecchia UI inline su /old. Temi, impostazioni, markdown + KaTeX.
+UI: page.html su /. Temi, impostazioni, markdown + KaTeX.
 """
 import http.server, json, threading, time, sys, os, hashlib, base64, subprocess, tempfile, uuid, io, re
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # moduli accanto (channels, store, agent)
@@ -213,20 +213,21 @@ def _html_to_pdf(html, footer=""):
     doc.close()
     return out
 
-def inject_system(messages):
-    """Antepone il pre-prompt (CFG['system_prompt']) al primo turno utente. DiffusionGemma non ha
-    un ruolo 'system', quindi lo iniettiamo nel testo del primo messaggio utente. Stringa vuota = off.
-    Usato solo dalla chat (non da compattazione/reload, che hanno istruzioni proprie)."""
+def system_message(doc_ctx=""):
+    """Turno `system` nativo del template: pre-prompt (CFG['system_prompt']) + documenti della chat.
+    Sta in TESTA al prompt e resta identico da un turno all'altro (prefisso stabile). NB: la prefix
+    cache di mlx-vlm 0.7.4 (APC) con DiffusionGemma non si attiva (stream_generate scarta apc_manager
+    e anche la chiamata diretta non registra checkpoint, verificato 2026-10-04): il documento viene
+    rielaborato a ogni turno (~11s per 20k token su M5 Max).
+    (Prima il pre-prompt veniva incollato nel messaggio utente e i documenti valevano solo nel turno in
+    cui erano allegati: al turno dopo il modello inventava. A/B 2026-10-03: system nativo = iniezione
+    nel seguire le regole, 9/9 vs 9/9.) None se non c'è nulla da dire."""
     sp = (CFG.get("system_prompt") or "").strip()
-    if not sp or not messages: return messages
-    out = [dict(m) for m in messages]
-    # ultimo turno utente: le istruzioni stanno subito PRIMA della domanda corrente, non sepolte
-    # in cima a un eventuale riassunto cumulativo (un modello a diffusione le segue molto di più).
-    for m in reversed(out):
-        if m.get("role") == "user" and isinstance(m.get("content"), str):
-            m["content"] = sp + "\n\n" + (m.get("content") or "")
-            break
-    return out
+    parts = [sp] if sp else []
+    if doc_ctx:
+        parts.append("Documenti allegati a questa conversazione. Usali come fonte principale; se "
+                     "un'informazione non c'è, dillo invece di inventarla.\n\n" + doc_ctx)
+    return {"role": "system", "content": "\n\n".join(parts)} if parts else None
 
 def genera(messages, steps, max_tokens):
     """Generazione non in streaming per i lavori interni (riassunti, map-reduce): solo il testo."""
@@ -670,11 +671,20 @@ def _ingest_put(fid, entry):
         INGEST[fid] = entry
     return entry
 
-def _evict_ingest():
-    """Cap memoria: scarta le voci più vecchie E i loro file su disco (niente leak in UPLOAD_DIR)."""
+INGEST_MAX = 48
+def _touch_ingest(ids):
+    """Gli allegati di una chat vengono rimandati a ogni turno: usarli li sposta in coda (LRU), così
+    l'eviction scarta quelli di chat abbandonate, non il documento della chat in corso."""
     with INGEST_LOCK:
-        if len(INGEST) <= 24: return
-        for k in list(INGEST)[:len(INGEST) - 24]:
+        for i in ids:
+            e = INGEST.pop(i, None)
+            if e is not None: INGEST[i] = e
+
+def _evict_ingest():
+    """Cap memoria: scarta le voci usate meno di recente E i loro file su disco (niente leak in UPLOAD_DIR)."""
+    with INGEST_LOCK:
+        if len(INGEST) <= INGEST_MAX: return
+        for k in list(INGEST)[:len(INGEST) - INGEST_MAX]:
             old = INGEST.pop(k, None)
             for p in (old or {}).get("paths") or []:
                 try: os.remove(p)
@@ -860,9 +870,10 @@ def _ntok(msgs):
     try: return len(TOK.apply_chat_template(msgs, add_generation_prompt=True, tokenize=True))
     except Exception: return sum(len(m["content"]) // 4 for m in msgs) + 8 * len(msgs)
 
-def _trim_budget(fed):
+def _trim_budget(fed, budget=None):
     """Se si sfora il budget, taglia i messaggi più vecchi dal centro tenendo riassunto + ultimo."""
-    while len(fed) > 2 and _ntok(fed) > CTX_BUDGET:
+    budget = CTX_BUDGET if budget is None else budget
+    while len(fed) > 2 and _ntok(fed) > budget:
         drop = 1 if fed[0]["content"].startswith(SUMMARY_PREFIX) else 0
         if drop >= len(fed) - 1: break
         fed.pop(drop)
@@ -894,7 +905,7 @@ def _summarize(prev, msgs):
     text, _, _ = genera([{"role": "user", "content": base}], 20, 400)
     return text.strip()
 
-def fit_context(messages, chat_id="default", on_status=None):
+def fit_context(messages, chat_id="default", on_status=None, budget=None):
     msgs = _clean(messages)
     if not msgs: return msgs
     if chat_id not in SESSIONS and len(SESSIONS) >= MAX_SESS:
@@ -921,7 +932,7 @@ def fit_context(messages, chat_id="default", on_status=None):
     if s["summary"]:
         fed.append({"role": "user", "content": SUMMARY_PREFIX + s["summary"]})
     fed += aged + msgs[end:]
-    return _merge_roles(_trim_budget(fed))
+    return _merge_roles(_trim_budget(fed, budget))
 
 def list_local_models():
     """Elenca i modelli a DIFFUSIONE già presenti sul Mac (gli unici che Gephid può usare):
@@ -1091,802 +1102,8 @@ def config_payload():
                       "script": os.path.abspath(__file__),
                       "hf_cache": os.path.expanduser("~/.cache/huggingface/hub")}}
 
-# HTML in stringa normale (mai f-string).
-PAGE = r"""<!DOCTYPE html><html lang="it"><head><meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>Gephid</title>
-<script src="/static/marked.min.js"></script>
-<script src="/static/purify.min.js"></script>
-<script src="/static/html2pdf.bundle.min.js"></script>
-<link rel="stylesheet" href="/static/katex.min.css">
-<script src="/static/katex.min.js"></script>
-<script src="/static/mhchem.min.js"></script>
-<script src="/static/auto-render.min.js"></script>
-<style>
-  [data-theme="dark"]{--bg:#0b0e14;--panel:#141925;--panel2:#1c2333;--text:#e6edf3;--accent:#4169e1;--accent-text:#8ab0ff;--accent-ink:#fff;--dim:#8b98a5;--border:#222b3a;--shadow:rgba(0,0,0,.45);--ubub:#4169e1;--utext:#fff}
-  [data-theme="light"]{--bg:#f4f6f9;--panel:#fff;--panel2:#eef1f6;--text:#1a1f29;--accent:#4169e1;--accent-text:#2f54c9;--accent-ink:#fff;--dim:#5d6675;--border:#dde3ec;--shadow:rgba(0,0,0,.12);--ubub:#4169e1;--utext:#fff}
-  *{box-sizing:border-box}
-  body{margin:0;font-family:-apple-system,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);height:100vh;display:flex;flex-direction:column;transition:background .2s,color .2s}
-  header{padding:12px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:11px;background:var(--panel)}
-  header .logo{width:30px;height:30px;flex:none}
-  header h1{font-size:1.02rem;margin:0;font-weight:600}
-  header .badge{font-size:.66rem;color:var(--dim);background:var(--panel2);border-radius:6px;padding:3px 8px}
-  header .sp{margin-left:auto}
-  .iconbtn{background:transparent;border:1px solid var(--border);color:var(--dim);width:36px;height:36px;border-radius:10px;cursor:pointer;font-size:1.1rem;display:flex;align-items:center;justify-content:center}
-  .iconbtn:hover{color:var(--accent);border-color:var(--accent)}
-  .txtbtn{background:transparent;border:1px solid var(--border);color:var(--dim);height:36px;padding:0 14px;border-radius:10px;cursor:pointer;font-size:.85rem;font-family:inherit}
-  .txtbtn:hover{color:var(--accent);border-color:var(--accent)}
-  #chat{flex:1;overflow-y:auto;padding:24px;display:flex;flex-direction:column;gap:15px;max-width:min(1100px,92vw);width:100%;margin:0 auto}
-  .msg{padding:12px 16px;border-radius:14px;max-width:82%;line-height:1.5;word-wrap:break-word;position:relative}
-  .msgexp{position:absolute;top:6px;right:8px;opacity:0;background:var(--bg);border:1px solid var(--border);color:var(--dim);width:24px;height:24px;border-radius:7px;cursor:pointer;font-size:.72rem;display:flex;align-items:center;justify-content:center;transition:opacity .15s}
-  .msg:hover .msgexp{opacity:.85}.msgexp:hover{color:var(--accent);opacity:1}
-  .msgactions{display:flex;gap:6px;margin-top:9px}
-  .actbtn{display:flex;align-items:center;gap:4px;background:transparent;border:1px solid var(--border);color:var(--dim);border-radius:7px;padding:3px 9px;font-size:.72rem;cursor:pointer;font-family:inherit;line-height:1.4}
-  .actbtn:hover{color:var(--accent);border-color:var(--accent)}.actbtn svg{width:12px;height:12px}
-  .user .actbtn{border-color:rgba(255,255,255,.35);color:rgba(255,255,255,.85)}
-  .user .actbtn:hover{border-color:#fff;color:#fff}
-  .exportmenu{position:fixed;background:var(--panel);border:1px solid var(--border);border-radius:11px;box-shadow:0 10px 34px var(--shadow);padding:6px;display:none;z-index:30;min-width:150px}
-  .exportmenu.on{display:block}
-  .exportmenu button{display:block;width:100%;text-align:left;background:transparent;border:none;color:var(--text);padding:9px 12px;border-radius:8px;cursor:pointer;font-size:.86rem}
-  .exportmenu button:hover{background:var(--panel2);color:var(--accent)}
-  .user{align-self:flex-end;background:var(--ubub);color:var(--utext);border-bottom-right-radius:4px;white-space:pre-wrap}
-  .assistant{align-self:flex-start;background:var(--panel2);border-bottom-left-radius:4px}
-  .assistant .tps{display:block;margin-top:8px;font-size:.72rem;color:var(--accent-text)}
-  .thinking{align-self:flex-start;color:var(--dim);font-style:italic;display:flex;flex-direction:column;gap:8px}
-  .bar{height:4px;width:180px;border-radius:3px;background:var(--panel2);overflow:hidden;position:relative}
-  .bar::after{content:'';position:absolute;top:0;left:-40%;width:40%;height:100%;background:var(--accent);border-radius:3px;animation:slide 1.05s ease-in-out infinite}
-  @keyframes slide{0%{left:-40%}100%{left:100%}}
-  .caret{display:inline-block;width:7px;height:1em;background:var(--accent);margin-left:3px;vertical-align:text-bottom;border-radius:1px;animation:blink .9s steps(2,start) infinite}
-  @keyframes blink{to{opacity:0}}
-  /* overlay d'avvio: copre la UI finché /api/health non dice model_ok (il modello sale in RAM) */
-  #bootov{position:fixed;inset:0;z-index:200;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;text-align:center;padding:40px;transition:opacity .4s}
-  #bootov.gone{opacity:0;pointer-events:none}
-  #bootov .bt{font-size:1.3rem;font-weight:600;color:var(--text)}
-  #bootov .bm{color:var(--dim);max-width:520px;line-height:1.6;font-size:.9rem}
-  #bootov .bsp{width:32px;height:32px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:bspin 1s linear infinite}
-  @keyframes bspin{to{transform:rotate(360deg)}}
-  .katex{font-size:1.04em}.katex-display{overflow-x:auto;overflow-y:hidden;padding:2px 0}
-  .compactsug{align-self:center;font-size:.82rem;color:var(--dim);background:var(--panel2);border:1px dashed var(--border);border-radius:11px;padding:8px 14px;margin-top:2px;text-align:center}
-  .compactsug a{color:var(--accent-text);font-weight:600;cursor:pointer}.compactsug a:hover{text-decoration:underline}
-  .assistant p{margin:.5em 0}.assistant p:first-child{margin-top:0}.assistant p:last-child{margin-bottom:0}
-  .assistant ul,.assistant ol{margin:.5em 0;padding-left:1.4em}.assistant li{margin:.2em 0}
-  .assistant h1,.assistant h2,.assistant h3{margin:.6em 0 .3em;font-size:1.08em}
-  .assistant a{color:var(--accent-text)}.assistant strong{font-weight:700}
-  code,pre{background:var(--bg);border:1px solid var(--border);border-radius:6px;font-family:'SF Mono',monospace;font-size:.88em}
-  code{padding:1px 5px}pre{padding:12px;overflow-x:auto}pre code{border:0;padding:0}
-  footer{border-top:1px solid var(--border);background:var(--panel);padding:11px 18px}
-  .composer{max-width:min(1100px,92vw);margin:0 auto;position:relative}
-  .inputwrap{position:relative}
-  .chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
-  .chip{display:flex;align-items:center;gap:6px;background:var(--panel2);border:1px solid var(--border);border-radius:9px;padding:4px 8px;font-size:.75rem;color:var(--text);max-width:260px}
-  .chip img{width:26px;height:26px;object-fit:cover;border-radius:5px;flex:none}
-  .chip .nm{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .chip .tk{color:var(--dim);flex:none}
-  .chip .x{cursor:pointer;color:var(--dim);font-weight:700;flex:none}.chip .x:hover{color:var(--accent)}
-  /* stati allegato: caricamento (spinner + "Leggo… (Ns)") -> pronto (pop + ✓ + token) */
-  @keyframes chpop{0%{transform:scale(.92)}55%{transform:scale(1.05)}100%{transform:scale(1)}}
-  .chip .spin{width:11px;height:11px;border-radius:50%;border:2px solid var(--accent);border-top-color:transparent;animation:bspin .7s linear infinite;flex:none}
-  .chip.loading{border-color:var(--accent)}
-  .chip.loading .nm{color:var(--accent-text)}
-  .chip .tk.load{color:var(--accent-text)}
-  .chip .ok{color:var(--accent-text);font-weight:700;flex:none}
-  .chip.ready{animation:chpop .3s ease-out}
-  .attrow{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
-  .attchip{display:flex;align-items:center;gap:5px;background:rgba(255,255,255,.2);border-radius:8px;padding:3px 8px;font-size:.74rem}
-  .attchip img{width:24px;height:24px;object-fit:cover;border-radius:4px}
-  #inp{width:100%;background:var(--bg);border:1px solid var(--border);border-radius:14px;color:var(--text);padding:13px 46px 13px 82px;font-size:1rem;resize:none;font-family:inherit;line-height:1.4;max-height:170px;overflow-y:auto}
-  #inp:focus{outline:none;border-color:var(--accent)}
-  .cbtn{position:absolute;bottom:8px;width:30px;height:30px;background:transparent;border:1px solid var(--border);color:var(--dim);border-radius:9px;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}
-  .cbtn:hover{color:var(--accent);border-color:var(--accent)}
-  .cbtn svg{width:16px;height:16px}
-  #attach{left:8px}#mic{left:44px;display:none}
-  #mic.rec{color:#fff;background:#e0245e;border-color:#e0245e}
-  #send{position:absolute;right:8px;bottom:8px;width:30px;height:30px;background:var(--accent);color:var(--accent-ink);border:1px solid var(--accent);border-radius:9px;font-size:1rem;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1;transition:opacity .15s}
-  #send:disabled{opacity:.35;cursor:not-allowed}
-  #send svg{width:16px;height:16px;display:block}
-  /* mentre legge il documento: il bottone invia diventa uno spinner (stato di lavoro) */
-  #send.loading{opacity:1;cursor:default;color:transparent}
-  #send.loading::after{content:'';position:absolute;left:50%;top:50%;width:15px;height:15px;margin:-7.5px 0 0 -7.5px;border-radius:50%;border:2px solid var(--accent-ink);border-top-color:transparent;animation:bspin .7s linear infinite}
-  /* a una riga: pulsanti centrati verticalmente; quando la textarea cresce: ancorati in basso */
-  .cbtn,#send{top:50%;bottom:auto;transform:translateY(-50%)}
-  .composer.grown .cbtn,.composer.grown #send{top:auto;bottom:8px;transform:none}
-  /* modal impostazioni */
-  .overlay{position:fixed;inset:0;background:rgba(0,0,0,.5);display:none;align-items:center;justify-content:center;z-index:10}
-  .overlay.on{display:flex}
-  .modal{background:var(--panel);border:1px solid var(--border);border-radius:16px;width:min(560px,92vw);max-height:88vh;overflow-y:auto;box-shadow:0 20px 60px var(--shadow)}
-  .modal header{border-radius:16px 16px 0 0}
-  .modal .body{padding:18px 22px}
-  .modal h3{margin:18px 0 8px;font-size:.82rem;text-transform:uppercase;letter-spacing:.5px;color:var(--dim)}
-  .modal h3:first-child{margin-top:0}
-  .seg{display:flex;gap:6px}
-  .seg button{flex:1;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:9px;border-radius:10px;cursor:pointer;font-size:.9rem}
-  .seg button.active{background:var(--accent);color:var(--accent-ink);border-color:var(--accent);font-weight:600}
-  .row{display:flex;align-items:center;gap:10px;margin:8px 0}
-  .row label{font-size:.85rem;min-width:130px;color:var(--dim)}
-  .row input[type=text],.row input[type=number],.row select{flex:1;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-family:inherit}
-  .row select{cursor:pointer}
-  .stepper{display:inline-flex;align-items:center;border:1px solid var(--border);border-radius:10px;overflow:hidden}
-  .stepper button{background:var(--bg);border:none;color:var(--text);width:42px;height:38px;font-size:1.4rem;cursor:pointer;line-height:1;display:flex;align-items:center;justify-content:center}
-  .stepper button:hover{background:var(--panel2);color:var(--accent)}
-  .stepper .sval{min-width:72px;text-align:center;font-weight:700;font-variant-numeric:tabular-nums;padding:0 6px}
-  .adv{margin:6px 0}
-  .adv summary{cursor:pointer;font-size:.78rem;color:var(--accent-text);list-style:none;user-select:none}
-  .adv summary::-webkit-details-marker{display:none}
-  .adv summary::before{content:"▸ "}.adv[open] summary::before{content:"▾ "}
-  .paths{font-size:.74rem;color:var(--dim);background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:10px 12px;line-height:1.7;word-break:break-all}
-  .paths b{color:var(--text)}
-  .hint{font-size:.76rem;color:var(--dim);line-height:1.5;margin:0 0 8px;overflow-wrap:normal;word-break:normal}
-  .savebtn{background:var(--accent);color:var(--accent-ink);border:none;border-radius:10px;padding:10px 16px;font-weight:700;cursor:pointer;margin-top:6px}
-  .inlinebtn{display:inline-block;margin-top:10px;background:var(--accent);color:var(--accent-ink);border:none;border-radius:9px;padding:7px 13px;font-size:.82rem;font-weight:600;cursor:pointer;font-family:inherit}
-  .inlinebtn:disabled{opacity:.6;cursor:default}
-  .note{font-size:.78rem;color:var(--accent-text);margin-top:8px;display:none}
-  .row{flex-wrap:wrap}
-  /* area cliccabile più comoda per la × delle chip (senza ingrandirne il glifo) */
-  .chip .x{padding:2px 4px;margin:-2px -2px -2px 0}
-  /* --- rifiniture UI/UX (review) --- */
-  *:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-  #chat{overflow-x:hidden}
-  .msg{overflow-wrap:anywhere}
-  .assistant table{display:block;max-width:100%;overflow-x:auto;border-collapse:collapse;margin:.5em 0}
-  .assistant th,.assistant td{border:1px solid var(--border);padding:6px 10px}
-  .user .msgactions{justify-content:flex-end}
-  .attchip{background:rgba(0,0,0,.26)}
-  .errbubble{align-self:center;background:transparent;border:1px solid var(--border);color:var(--dim);font-size:.85rem;max-width:min(82%,640px);padding:10px 14px;border-radius:11px}
-  header h1{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
-  header .badge,header .txtbtn,header .iconbtn{flex:none}
-  .stepper button:active{background:var(--panel2)}
-  .stepper button:disabled{opacity:.4;cursor:default}
-  @media (prefers-reduced-motion: reduce){ .bar::after,.caret,.sp,.chip .spin,#send.loading::after,.chip.ready{animation:none} .caret{opacity:.6} }
-</style></head>
-<body>
-  <header>
-    <span class="logo">__LOGO__</span>
-    <h1>Gephid</h1><span class="badge">offline · MLX</span>
-    <span class="sp"></span>
-    <button class="txtbtn" id="newchat" title="Nuova chat" aria-label="Nuova chat">Nuova chat</button>
-    <button class="txtbtn" id="export" title="Esporta tutta la chat" aria-label="Esporta la chat">Esporta</button>
-    <button class="txtbtn" id="gear" title="Impostazioni" aria-label="Impostazioni">Impostazioni</button>
-  </header>
 
-  <div id="bootov">
-    <span class="logo">__LOGO__</span>
-    <div class="bt">Carico il modello…</div>
-    <div class="bsp"></div>
-    <div class="bm" id="bootmsg">Primo avvio: il modello a diffusione sale in memoria. Ci vuole qualche secondo.</div>
-  </div>
-
-  <div id="chat">
-    <div class="msg assistant">Ciao! Sono <b>Gephid</b>, giro 100% offline sul tuo Mac.
-Genero il testo "a blocchi" via diffusione. Chiedimi qualcosa!</div>
-  </div>
-
-  <footer>
-    <div class="composer">
-      <div id="chips" class="chips"></div>
-      <div class="inputwrap">
-        <textarea id="inp" rows="1" placeholder="Carico il modello…" disabled autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
-        <button id="attach" class="cbtn" title="Allega immagini o documenti" aria-label="Allega immagini o documenti"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5l-8.5 8.5a5 5 0 0 1-7.07-7.07l8.49-8.49a3.5 3.5 0 0 1 4.95 4.95l-8.49 8.49a1.5 1.5 0 0 1-2.12-2.12l7.78-7.78"/></svg></button>
-        <button id="mic" class="cbtn" title="Dettatura (macOS): premi per avviare, ripremi per fermare" aria-label="Dettatura vocale" aria-pressed="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></button>
-        <button id="send" title="Invia" aria-label="Invia messaggio"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
-      </div>
-      <input type="file" id="fileinput" multiple style="display:none" accept="image/*,.txt,.md,.markdown,.csv,.json,.log,.pdf,.docx,.xlsx,.xlsm,.py,.js,.ts,.tsx,.html,.css,.java,.c,.cpp,.h,.go,.rs,.sh,.yaml,.yml,.xml">
-    </div>
-  </footer>
-
-  <div class="exportmenu" id="expmenu">
-    <button data-f="copy">Copia testo</button>
-    <button data-f="md">Markdown (.md)</button>
-    <button data-f="txt">Testo (.txt)</button>
-    <button data-f="html">HTML (.html)</button>
-    <button data-f="pdf">PDF (.pdf)</button>
-    <button data-f="compact">Compatta in 1 prompt</button>
-  </div>
-
-  <!-- IMPOSTAZIONI -->
-  <div class="overlay" id="ov">
-    <div class="modal">
-      <header><span class="logo">__LOGO__</span><h1>Impostazioni</h1><span class="sp"></span>
-        <button class="iconbtn" id="closeset" title="Chiudi" aria-label="Chiudi impostazioni">&times;</button></header>
-      <div class="body">
-        <h3>Aspetto</h3>
-        <div class="seg" id="themeseg">
-          <button data-t="system">Sistema</button>
-          <button data-t="light">Chiaro</button>
-          <button data-t="dark">Scuro</button>
-        </div>
-
-        <h3>Dettatura vocale</h3>
-        <div class="seg" id="dictseg">
-          <button data-d="off">Disattivata</button>
-          <button data-d="on">Microfono</button>
-        </div>
-        <div class="hint">Se attiva, compare il microfono nel campo per dettare (offline). Al primo uso macOS chiede i permessi.</div>
-
-        <h3>Generazione</h3>
-        <div class="row"><label>Step di denoising</label><div class="stepper" id="stStep"></div></div>
-        <div class="hint">Più step = testo più pulito ma più lento. Consigliato <b>48</b> (64 per codice/documenti).</div>
-        <div class="row"><label>Max token risposta</label><div class="stepper" id="stTok"></div></div>
-        <div class="hint">Lunghezza massima della risposta (1 token ≈ 0,75 parole). Il modello si ferma comunque da solo a fine risposta: un valore alto serve solo a non troncare.</div>
-
-        <h3>OCR documenti scansionati</h3>
-        <div class="seg" id="ocrseg">
-          <button data-o="apple">Apple Vision</button>
-          <button data-o="local">GLM locale</button>
-          <button data-o="omlx">Router oMLX</button>
-        </div>
-        <div class="hint"><b>GLM locale</b> (consigliato): potente e tutto dentro Gephid, non impalla.<br><b>Apple Vision</b>: leggero e integrato.<br><b>Router oMLX</b>: massima resa, ma richiede il server attivo.</div>
-
-        <h3>Modello</h3>
-        <div class="row"><label>Sul tuo Mac</label><select id="modelsel" style="flex:1;min-width:0"></select></div>
-        <details class="adv"><summary>Avanzato: HF id o cartella</summary>
-          <div class="hint" style="margin-top:6px">Incolla un HF id (già in cache) o il percorso di una cartella-modello locale.</div>
-          <div class="row"><input type="text" id="modelin" placeholder="HF id o percorso cartella" style="min-width:0"></div>
-        </details>
-        <button class="savebtn" id="savemodel" style="margin-top:10px">Salva e carica</button>
-        <div class="note" id="restartnote"></div>
-      </div>
-    </div>
-  </div>
-
-<script>
-  const $=id=>document.getElementById(id);
-  const chat=$('chat'),inp=$('inp'),send=$('send');
-  // stick-to-bottom: si auto-scrolla solo se sei già in fondo (così puoi rileggere su mentre genera)
-  let stick=true;
-  chat.addEventListener('scroll',()=>{stick=(chat.scrollHeight-chat.scrollTop-chat.clientHeight)<80;});
-  function scrollDown(){if(stick)chat.scrollTo(0,chat.scrollHeight);}
-  let history=[];
-  let attachments=[]; // allegati in attesa di invio: {id,kind,name,tokens,thumb}
-  let curSteps=48,curMaxTok=32768; // valori effettivi (modificabili solo da Impostazioni); allineati ai default del backend
-  let busy=false; // anti doppio-invio (fix: Enter mentre una richiesta è in corso)
-  let modelReady=false; // false finché /api/health non dice model_ok: composer disabilitato + overlay
-  let recording=false,dictBase='',dictTimer=null; // dettatura vocale
-  let chatId=(window.crypto&&crypto.randomUUID)?crypto.randomUUID():('c'+Date.now()+Math.round(Math.random()*1e6));
-  function newChat(){
-    if(busy)return;
-    history=[];attachments=[];renderChips();
-    if(compactSuggest){compactSuggest.remove();compactSuggest=null;}
-    chatId=(window.crypto&&crypto.randomUUID)?crypto.randomUUID():('c'+Date.now());
-    chat.innerHTML='<div class="msg assistant">Ciao! Sono <b>Gephid</b>, giro 100% offline sul tuo Mac. Genero il testo "a blocchi" via diffusione. Chiedimi qualcosa!</div>';
-    inp.value='';inp.style.height='auto';inp.focus();stick=true;updateSendState();
-  }
-  function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
-  // marked tratta \( \) \[ \] come escape markdown e ne emette solo ( ) [ ]: quei delimitatori LaTeX
-  // non arrivavano mai a KaTeX. Raddoppiando il backslash marked ne emette uno letterale e
-  // auto-render li riconosce. Dentro il codice (fence ``` e span `…`) non si tocca nulla.
-  function mathEscape(src){
-    if(!src||src.indexOf('\\')<0)return src;
-    return String(src).split(/(```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)|`[^`\n]*`)/g)
-      .map(function(seg,i){return i%2?seg:seg.replace(/\\([[\]()])/g,'\\\\$1');}).join('');
-  }
-  // Renderizza markdown solo se marked+DOMPurify sono entrambi presenti; altrimenti testo grezzo (fail-safe).
-  function safeHtml(text){return (window.marked&&window.DOMPurify)?DOMPurify.sanitize(marked.parse(mathEscape(text))):null;}
-  // Anti-esfiltrazione: l'output del modello è untrusted (prompt injection nei documenti).
-  // Nel markdown reso niente risorse né link esterni: src/href devono restare locali (oltre alla CSP).
-  if(window.DOMPurify){DOMPurify.addHook('afterSanitizeAttributes',function(n){
-    if(n.hasAttribute('src')&&!/^(\/|data:image\/)/.test(n.getAttribute('src')||''))n.removeAttribute('src');
-    if(n.hasAttribute('srcset'))n.removeAttribute('srcset');
-    if(n.hasAttribute('href')){var h=n.getAttribute('href')||'';if(!/^(#|\/(?!\/))/.test(h)){n.setAttribute('data-blocked-href',h);n.removeAttribute('href');}}
-  });}
-  // Un link esterno cliccato navigherebbe la WKWebView fuori dall'app (e senza "indietro"): blocca.
-  document.addEventListener('click',function(e){var a=e.target.closest&&e.target.closest('a');if(!a)return;
-    var h=a.getAttribute('href')||a.getAttribute('data-blocked-href')||'';
-    if(/^(#|\/(?!\/))/.test(h))return;
-    e.preventDefault();e.stopPropagation();
-    if(h)addError('Link esterno bloccato (Gephid è offline): '+h.slice(0,120));
-  },true);
-  // drop di file/URL: senza preventDefault la webview navigherebbe via dalla UI
-  ['dragover','drop'].forEach(function(ev){document.addEventListener(ev,function(e){e.preventDefault();});});
-
-  // ---- TEMA: system/light/dark, default system ----
-  const mq=window.matchMedia('(prefers-color-scheme: dark)');
-  function effective(t){return t==='system' ? (mq.matches?'dark':'light') : t;}
-  function applyTheme(){const t=localStorage.getItem('diffuchat-theme')||'system';
-    document.documentElement.dataset.theme=effective(t);
-    document.querySelectorAll('#themeseg button').forEach(b=>b.classList.toggle('active',b.dataset.t===t));}
-  mq.addEventListener('change',()=>{ if((localStorage.getItem('diffuchat-theme')||'system')==='system') applyTheme(); });
-  document.querySelectorAll('#themeseg button').forEach(b=>b.onclick=()=>{localStorage.setItem('diffuchat-theme',b.dataset.t);applyTheme();});
-  applyTheme();
-
-  // ---- DETTATURA opt-in: il microfono compare solo se abilitato in Impostazioni ----
-  function applyDict(){const on=localStorage.getItem('gephid-dictation')==='1';
-    $('mic').style.display=on?'flex':'none';$('inp').style.paddingLeft=on?'':'46px';
-    document.querySelectorAll('#dictseg button').forEach(b=>b.classList.toggle('active',(b.dataset.d==='on')===on));}
-  document.querySelectorAll('#dictseg button').forEach(b=>b.onclick=async()=>{
-    const on=b.dataset.d==='on';localStorage.setItem('gephid-dictation',on?'1':'0');
-    if(!on&&recording){await stopDict();}applyDict();});
-
-  // ---- OCR documenti: motore selezionabile (apple | omlx | paranoid) ----
-  function applyOcr(eng){document.querySelectorAll('#ocrseg button').forEach(b=>b.classList.toggle('active',b.dataset.o===eng));}
-  document.querySelectorAll('#ocrseg button').forEach(b=>b.onclick=async()=>{
-    applyOcr(b.dataset.o);
-    try{await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ocr_engine:b.dataset.o})});}catch(e){}
-  });
-
-  // ---- config / impostazioni ----
-  $('newchat').onclick=newChat;
-  $('gear').onclick=()=>{$('ov').classList.add('on');loadModels();}; // ricarica la lista modelli all'apertura
-  $('closeset').onclick=()=>$('ov').classList.remove('on');
-  $('ov').onclick=e=>{if(e.target===$('ov'))$('ov').classList.remove('on');};
-  // stepper -/+ chiaro; onChange applica subito (curSteps/curMaxTok) e salva
-  function makeStepper(el,min,max,step,onChange){
-    let v=min;
-    const dec=document.createElement('button');dec.textContent='−';
-    const val=document.createElement('span');val.className='sval';
-    const inc=document.createElement('button');inc.textContent='+';
-    function render(){val.textContent=v;dec.disabled=(v<=min);inc.disabled=(v>=max);}
-    function setv(nv){v=Math.max(min,Math.min(max,nv));render();onChange(v);}
-    dec.onclick=()=>setv(v-step);inc.onclick=()=>setv(v+step);
-    el.appendChild(dec);el.appendChild(val);el.appendChild(inc);render();
-    return {get:()=>v,set:(nv)=>{v=Math.max(min,Math.min(max,nv));render();}};
-  }
-  let cfgReady=false;
-  const stStep=makeStepper($('stStep'),16,64,4,v=>{curSteps=v;if(cfgReady)saveCfg();});
-  const stTok=makeStepper($('stTok'),2048,32768,2048,v=>{curMaxTok=v;if(cfgReady)saveCfg();});
-  stStep.set(curSteps);stTok.set(curMaxTok); // display allineato ai default anche se /api/config non risponde
-  async function loadConfig(){
-    try{const c=await(await fetch('/api/config')).json();
-      curSteps=c.default_steps;curMaxTok=c.default_max_tokens;
-      stStep.set(c.default_steps);stTok.set(c.default_max_tokens);$('modelin').value=c.model;
-      applyOcr(c.ocr_engine||'apple');
-    }catch(e){}
-    cfgReady=true;
-  }
-  async function loadModels(){
-    try{const d=await(await fetch('/api/models')).json();const sel=$('modelsel');sel.innerHTML='';
-      let has=false;
-      (d.models||[]).forEach(m=>{const o=document.createElement('option');o.value=m.id;o.textContent=m.label;if(m.id===d.current){o.selected=true;has=true;}sel.appendChild(o);});
-      if(!has&&d.current){const o=document.createElement('option');o.value=d.current;o.textContent=d.current+' (attuale)';o.selected=true;sel.insertBefore(o,sel.firstChild);}
-      $('modelin').value=d.current; // allinea il campo al modello effettivamente caricato
-      sel.onchange=()=>{$('modelin').value=sel.value;};
-    }catch(e){}
-  }
-  async function saveCfg(){
-    try{await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({default_steps:curSteps,default_max_tokens:curMaxTok})});}catch(e){}
-  }
-  $('savemodel').onclick=async()=>{
-    const model=$('modelin').value.trim();if(!model)return;
-    const note=$('restartnote');note.style.display='block';note.textContent='Carico il modello…';
-    $('savemodel').disabled=true;
-    try{
-      const resp=await fetch('/api/reload',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model})});
-      const reader=resp.body.getReader(),dec=new TextDecoder();let buf='',err=null,okk=false;
-      while(true){const {value,done}=await reader.read();if(done)break;buf+=dec.decode(value,{stream:true});let nl;
-        while((nl=buf.indexOf('\n'))>=0){const line=buf.slice(0,nl);buf=buf.slice(nl+1);if(line.trim()){try{const o=JSON.parse(line);if(o.status)note.textContent=o.status;if(o.error)err=o.error;if(o.done)okk=true;}catch(e){}}}}
-      note.textContent=err?('Errore: '+err):(okk?'Modello caricato e pronto.':'Fatto.');
-      if(okk&&!err){markModelReady();setTimeout(()=>{note.style.display='none';},2500);}
-    }catch(e){note.textContent='Errore: '+e;}
-    $('savemodel').disabled=false;
-  };
-
-  // ---- chat ----
-  // Renderizza il contenuto: markdown sanificato + formule LaTeX (KaTeX), o testo grezzo (fail-safe).
-  function renderInto(d,role,text,skipMath){
-    let h=null;if(role==='assistant')h=safeHtml(text);
-    if(h!==null){d.innerHTML=h; if(!skipMath&&window.renderMathInElement){try{renderMathInElement(d,{delimiters:[{left:'$$',right:'$$',display:true},{left:'\\[',right:'\\]',display:true},{left:'\\(',right:'\\)',display:false},{left:'$',right:'$',display:false}],ignoredTags:['script','noscript','style','textarea','pre','code'],throwOnError:false});}catch(e){}}}
-    else d.textContent=text;
-  }
-  // bolla di errore/sistema distinta dalle risposte (niente avatar, niente pulsanti copia/scarica)
-  function addError(text){const d=document.createElement('div');d.className='msg errbubble';d.textContent=text;chat.appendChild(d);scrollDown();return d;}
-  // Effetto "macchina da scrivere" stile ChatGPT: il modello genera a blocchi, li riveliamo
-  // gradualmente con requestAnimationFrame (testo semplice durante; markdown+KaTeX a fine).
-  function makeTyper(bubble){
-    let target='',shown=0,raf=null,done=false,last=0,lastPaint=0,caretOn=false;
-    // Renderizza markdown live del testo già rivelato (senza KaTeX: le formule si "katexano" a finish,
-    // così niente flicker su $…$ incompleti). Fail-safe a testo grezzo se marked/DOMPurify mancano.
-    // Posiziona il caret a fine dell'ultimo elemento testuale (p/li/heading) così sta a fine riga;
-    // se l'ultimo blocco è pre/tabella/citazione lo mette dopo il blocco, mai dentro (no caret nel codice).
-    function placeCaret(){
-      const c=document.createElement('span');c.className='caret';
-      let host=bubble,el=bubble.lastElementChild;
-      while(el){
-        const t=el.tagName;
-        if(t==='PRE'||t==='TABLE'||t==='BLOCKQUOTE'||t==='HR'){host=bubble;break;}
-        if((t==='UL'||t==='OL'||t==='DL')&&el.lastElementChild){el=el.lastElementChild;continue;} // entra nell'ultima voce
-        host=el;break; // P, LI, H1..H6, ecc.: caret a fine di questo elemento
-      }
-      host.appendChild(c);
-    }
-    function paint(ts,withCaret){
-      renderInto(bubble,'assistant',target.slice(0,shown),true);
-      if(withCaret)placeCaret();
-      lastPaint=ts;caretOn=withCaret;scrollDown();
-    }
-    function frame(ts){
-      raf=null;if(done)return;
-      const dt=last?Math.min(ts-last,100):16;last=ts;
-      if(shown<target.length){
-        const step=Math.max(Math.ceil((target.length-shown)/12),Math.ceil(dt*0.6)); // ~600 char/s, accelera se resta indietro
-        shown=Math.min(target.length,shown+step);
-        // throttle del re-parse markdown (~12 render/s): fluido e con costo trascurabile (delta rari)
-        if(ts-lastPaint>=80||shown===target.length)paint(ts,false);else scrollDown();
-      }else if(!caretOn){
-        // raggiunto il testo ricevuto ma la generazione continua: cursore lampeggiante
-        // (il modello sta denoisando il prossimo blocco da 256 token: non è bloccato)
-        paint(ts,true);
-      }
-      raf=requestAnimationFrame(frame);
-    }
-    return {
-      push(t){target=t;if(raf==null&&!done){last=0;raf=requestAnimationFrame(frame);}},
-      finish(){done=true;if(raf){cancelAnimationFrame(raf);raf=null;}renderInto(bubble,'assistant',target,false);scrollDown();return Promise.resolve();}
-    };
-  }
-  const SVG_COPY='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>';
-  const SVG_DL='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M8 11l4 4 4-4"/><path d="M5 21h14"/></svg>';
-  function copyBtnFor(text){
-    const b=document.createElement('button');b.className='actbtn';b.dataset.exp='1';b.title='Copia testo';b.setAttribute('aria-label','Copia testo');b.innerHTML=SVG_COPY+'Copia';
-    b.onclick=ev=>{ev.stopPropagation();if(navigator.clipboard)navigator.clipboard.writeText(text).then(()=>{b.innerHTML='✓ Copiato';setTimeout(()=>{b.innerHTML=SVG_COPY+'Copia';},900);}).catch(()=>{});};
-    return b;
-  }
-  function exportBtnFor(role,text){
-    const b=document.createElement('button');b.className='actbtn';b.dataset.exp='1';b.title='Esporta messaggio';b.setAttribute('aria-label','Scarica messaggio');b.innerHTML=SVG_DL+'Scarica';
-    b.onclick=ev=>{ev.stopPropagation();const r=b.getBoundingClientRect();openExportMenu(r.left,r.bottom+4,[{role:role,content:text}],true);};
-    return b;
-  }
-  function msgButtons(d,role,text){const row=document.createElement('div');row.className='msgactions';row.appendChild(copyBtnFor(text));if(role!=='user')row.appendChild(exportBtnFor(role,text));d.appendChild(row);}
-  function add(role,text,tps){
-    const d=document.createElement('div');d.className='msg '+role;
-    if(role==='thinking'){const sp=document.createElement('span');d.appendChild(sp);const bar=document.createElement('div');bar.className='bar';d.appendChild(bar);
-      // contatore secondi + etichetta aggiornabile (d._label): mostra gli stati di avanzamento del
-      // backend (es. "comprimo parte 3/21…" durante il map-reduce di un documento grande)
-      d._label=text;const t0=Date.now();const upd=()=>{sp.textContent=d._label+' ('+Math.floor((Date.now()-t0)/1000)+'s)';};upd();
-      const iv=setInterval(()=>{if(!d.isConnected){clearInterval(iv);return;}upd();},1000);}
-    else{
-      renderInto(d,role,text);
-      if(tps){const s=document.createElement('span');s.className='tps';s.textContent=tps+' tok/s · '+curSteps+' step';d.appendChild(s);}
-      if(text!=='')msgButtons(d,role,text); // i pulsanti solo se c'è testo (il placeholder in streaming li riceve a fine)
-    }
-    chat.appendChild(d);scrollDown();return d;
-  }
-
-  // Legge una risposta NDJSON in streaming. onDelta(testoCumulativo) ad ogni blocco. Ritorna {acc,tps,err}.
-  async function streamNDJSON(url,body,onDelta,signal,onStatus){
-    const resp=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),signal});
-    let acc='',tps=null,err=null;
-    function handle(o){if(o.error)err=o.error;else if(o.delta!==undefined){acc+=o.delta;onDelta(acc);}else if(o.status!==undefined){if(onStatus)onStatus(o.status);}else if(o.done)tps=o.tps;}
-    if(resp.body&&resp.body.getReader){
-      const reader=resp.body.getReader(),dec=new TextDecoder();let buf='';
-      while(true){const {value,done}=await reader.read();if(done)break;buf+=dec.decode(value,{stream:true});
-        let nl;while((nl=buf.indexOf('\n'))>=0){const line=buf.slice(0,nl);buf=buf.slice(nl+1);if(line.trim()){try{handle(JSON.parse(line));}catch(e){}}}}
-      if(buf.trim()){try{handle(JSON.parse(buf));}catch(e){}}
-    }else{const t=await resp.text();t.split('\n').forEach(l=>{if(l.trim()){try{handle(JSON.parse(l));}catch(e){}}});}
-    return {acc,tps,err};
-  }
-
-  let aborter=null;
-  // "invia" disabilitato quando non c'è nulla da inviare (ma sempre attivo come "ferma" durante la generazione)
-  function updateSendState(){
-    const loading=attachments.some(a=>a.loading);
-    send.classList.toggle('loading', loading && !busy);   // spinner sul bottone mentre legge
-    send.disabled=(!busy)&&(!modelReady||loading||(!inp.value.trim()&&!attachments.some(a=>a.id)));
-    if(!busy) send.title=loading?'Sto leggendo il documento…':'Invia';
-  }
-  const ICON_SEND='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>';
-  const ICON_STOP='<svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/></svg>';
-  function setStopMode(on){send.innerHTML=on?ICON_STOP:ICON_SEND;send.title=on?'Ferma':'Invia';send.setAttribute('aria-label',on?'Ferma generazione':'Invia messaggio');updateSendState();}
-  function stopGen(){if(aborter)try{aborter.abort();}catch(e){}}
-  async function ask(){
-    if(busy||!modelReady)return;
-    if(attachments.some(a=>!a.id)){return;} // allegati ancora in caricamento: aspetta
-    const m=inp.value.trim();
-    const atts=attachments.filter(a=>a.id);
-    if(!m&&!atts.length)return;
-    const usedSteps=curSteps; // gli step di QUESTO messaggio (la telemetria non deve cambiare se l'utente li modifica dopo)
-    if(compactSuggest){compactSuggest.remove();compactSuggest=null;}
-    busy=true;inp.value='';inp.style.height='auto';setStopMode(true);
-    if(recording){dictBase='';if(window.gephidDictReset)gephidDictReset();} // svuota la trascrizione (mic resta attivo per il prossimo)
-    const userMsg={role:'user',content:m||'(vedi allegati)'};
-    const ud=add('user',m||(atts.length?'':'(allegato)'));history.push(userMsg);
-    if(atts.length){ // mostra gli allegati dentro il messaggio inviato
-      const ar=document.createElement('div');ar.className='attrow';
-      atts.forEach(a=>{const c=document.createElement('span');c.className='attchip';
-        if(a.thumb){const im=document.createElement('img');im.src=a.thumb;c.appendChild(im);}
-        c.appendChild(document.createTextNode(a.name+(a.kind==='doc'?(' ('+a.tokens+' tok)'):'')));ar.appendChild(c);});
-      ud.appendChild(ar);scrollDown();
-    }
-    attachments=[];renderChips(); // consumati da questo turno
-    const th=add('thinking','Denoising primo blocco…');
-    let acc='',dmsg=null,typer=null,tps=null,err=null,aborted=false;
-    aborter=new AbortController();
-    const popUser=()=>{const i=history.indexOf(userMsg);if(i>=0)history.splice(i,1);}; // rimuovi per identità
-    const onDelta=a=>{acc=a;if(!dmsg){th.remove();dmsg=add('assistant','');typer=makeTyper(dmsg);}typer.push(acc);};
-    try{
-      try{
-        const onStatus=s=>{if(th&&th.isConnected&&th._label!==undefined)th._label=s;}; // avanzamento map-reduce nella bolla "thinking"
-        const r=await streamNDJSON('/api/chat',{chat_id:chatId,messages:history,steps:curSteps,max_tokens:curMaxTok,attach:atts.map(a=>a.id)},onDelta,aborter.signal,onStatus);
-        tps=r.tps;err=r.err;
-      }catch(e){if(e&&e.name==='AbortError')aborted=true;else err=String(e);}
-      if(th.parentNode)th.remove();
-      if(err){
-        if(typer)await typer.finish();
-        if(dmsg)dmsg.remove();
-        popUser(); // turno utente fallito: non lasciarlo in cronologia (no duplicati al retry)
-        if(m){inp.value=m;grow();} // ripristina il testo digitato così puoi ritentare
-        addError('Errore: '+err);
-      }else if(!acc&&aborted){
-        popUser(); // fermato senza output
-      }else if(!acc.trim()){
-        if(typer)await typer.finish();
-        if(dmsg)dmsg.remove(); // risposta vuota: niente bolla/caret orfano
-        addError('(nessuna risposta dal modello — riprova, o alza step/token)');
-      }else{
-        if(!dmsg)dmsg=add('assistant',acc);
-        else{await typer.finish();if(tps){const s=document.createElement('span');s.className='tps';s.textContent=tps+' tok/s · '+usedSteps+' step';dmsg.appendChild(s);}msgButtons(dmsg,'assistant',acc);}
-        history.push({role:'assistant',content:acc});addCompactSuggest();
-      }
-    }finally{
-      busy=false;aborter=null;setStopMode(false);inp.focus();
-    }
-  }
-  send.onclick=()=>{if(busy){stopGen();return;}if(attachments.some(a=>a.loading))return;ask();};
-  // textarea si ingrandisce con le righe (fino a max, poi scroll)
-  const composerEl=document.querySelector('.composer');
-  function grow(){inp.style.height='auto';const sh=inp.scrollHeight;inp.style.height=Math.min(sh,170)+'px';
-    composerEl.classList.toggle('grown',sh>54);} // >1 riga -> pulsanti in basso, altrimenti centrati
-  inp.addEventListener('input',grow);
-  inp.addEventListener('input',updateSendState);
-  // se durante la dettatura modifichi/svuoti a mano la casella, quella diventa la nuova base
-  // (il polling riparte da lì) -> cancellando resta cancellato, e puoi correggere a mano.
-  inp.addEventListener('input',()=>{ if(recording){ dictBase=inp.value; if(window.gephidDictReset)gephidDictReset(); } });
-  inp.addEventListener('keydown',e=>{
-    if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();if(!busy)ask();}
-    else if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='a'){e.preventDefault();inp.select();} // Cmd+A (webview non lo fa di default)
-  });
-
-  // ---- ALLEGATI: immagini (vision) e documenti (estrazione + token) ----
-  function fileToB64(file){return new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res((r.result+'').split(',')[1]||'');r.onerror=rej;r.readAsDataURL(file);});}
-  function renderChips(){
-    const c=$('chips');c.textContent='';
-    attachments.forEach(a=>{
-      const ch=document.createElement('div');
-      ch.className='chip'+(a.loading?' loading':'')+(a._justReady?' ready':'');
-      if(a._justReady)a._justReady=false;
-      if(a.loading){const sp=document.createElement('span');sp.className='spin';ch.appendChild(sp);}
-      else if(a.kind==='image'&&a.thumb){const im=document.createElement('img');im.src=a.thumb;ch.appendChild(im);}
-      const nm=document.createElement('span');nm.className='nm';nm.textContent=a.name;ch.appendChild(nm);
-      if(a.loading){
-        const t=document.createElement('span');t.className='tk load';ch.appendChild(t);
-        const t0=a.t0||Date.now();
-        const upd=()=>{t.textContent='Leggo… ('+Math.floor((Date.now()-t0)/1000)+'s)';};upd();
-        const iv=setInterval(()=>{if(!t.isConnected||!a.loading){clearInterval(iv);return;}upd();},1000);
-      }else if(a.kind==='doc'){
-        const ok=document.createElement('span');ok.className='ok';ok.textContent='✓';ch.appendChild(ok);
-        const t=document.createElement('span');t.className='tk';t.textContent=a.tokens+' tok';ch.appendChild(t);
-      }
-      const x=document.createElement('span');x.className='x';x.textContent='×';x.title=a.loading?'Annulla lettura':'Rimuovi';
-      x.onclick=()=>{if(a.loading){if(a._ctrl){try{a._ctrl.abort();}catch(e){}}
-        if(a._tok)fetch('/api/ingest/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:a._tok})}).catch(()=>{});} // ferma anche l'OCR lato server
-        attachments=attachments.filter(z=>z!==a);renderChips();};ch.appendChild(x);
-      c.appendChild(ch);
-    });
-    updateSendState();
-  }
-  function cancelToken(){return (window.crypto&&crypto.randomUUID)?crypto.randomUUID():('t'+Date.now()+Math.round(Math.random()*1e9));}
-  async function ingestPath(path){
-    const name=path.split('/').pop();
-    const isImg=/\.(png|jpe?g|gif|webp|bmp|heic|tiff)$/i.test(name);
-    const ph={id:null,kind:isImg?'image':'doc',name:name,tokens:0,loading:true,thumb:null,t0:Date.now(),_ctrl:null,_tok:cancelToken()};
-    try{ph._ctrl=new AbortController();}catch(e){}
-    attachments.push(ph);renderChips();
-    try{
-      const r=await(await fetch('/api/ingest',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:path,cancel_token:ph._tok}),signal:ph._ctrl&&ph._ctrl.signal})).json();
-      if(r.error){attachments=attachments.filter(z=>z!==ph);addError('Errore allegato "'+name+'": '+r.error);}
-      else{ph.id=r.id;ph.kind=r.kind;ph.tokens=r.tokens||0;ph.loading=false;ph._justReady=true;}
-      renderChips();
-    }catch(err){attachments=attachments.filter(z=>z!==ph);renderChips();}
-  }
-  $('attach').onclick=async()=>{
-    if(window.gephidOpenFiles){ // pannello file nativo (WKWebView non apre <input type=file>)
-      let s='';try{s=await gephidOpenFiles();}catch(e){}
-      for(const p of (s||'').split('\n').filter(Boolean)) await ingestPath(p);
-      inp.focus(); // il pannello nativo ruba il focus: riportalo sull'input (altrimenti tastiera/Tab morti)
-    }else{$('fileinput').click();} // fallback
-  };
-  $('fileinput').onchange=async e=>{
-    const files=[...e.target.files];e.target.value='';
-    for(const f of files){
-      const isImg=(f.type||'').startsWith('image/');
-      let b64;try{b64=await fileToB64(f);}catch(err){continue;}
-      const ph={id:null,kind:isImg?'image':'doc',name:f.name,tokens:0,loading:true,thumb:isImg?('data:'+(f.type||'image/png')+';base64,'+b64):null,t0:Date.now(),_ctrl:null,_tok:cancelToken()};
-      try{ph._ctrl=new AbortController();}catch(e){}
-      attachments.push(ph);renderChips();
-      try{
-        const r=await(await fetch('/api/ingest',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:f.name,content:b64,cancel_token:ph._tok}),signal:ph._ctrl&&ph._ctrl.signal})).json();
-        if(r.error){attachments=attachments.filter(z=>z!==ph);addError('Errore allegato "'+f.name+'": '+r.error);}
-        else{ph.id=r.id;ph.kind=r.kind;ph.tokens=r.tokens||0;ph.loading=false;ph._justReady=true;}
-        renderChips();
-      }catch(err){attachments=attachments.filter(z=>z!==ph);renderChips();}
-    }
-    inp.focus();
-  };
-
-  // ---- DETTATURA: usa la dettatura nativa di macOS (offline). Click avvia, ri-click ferma. ----
-  async function stopDict(){
-    recording=false;$('mic').classList.remove('rec');$('mic').setAttribute('aria-pressed','false');
-    if(dictTimer){clearInterval(dictTimer);dictTimer=null;}
-    if(window.gephidDictStop)gephidDictStop();
-    if(window.gephidDictText){try{const t=await gephidDictText();inp.value=dictBase+t;grow();}catch(e){}}
-    inp.focus();
-  }
-  $('mic').onclick=async()=>{
-    if(!window.gephidDictStart){addError('Dettatura non disponibile in questa finestra.');return;}
-    if(recording){await stopDict();return;}
-    inp.focus();
-    let r;try{r=await gephidDictStart();}catch(e){r=-1;}
-    if(r===-3){addError('Concedi i permessi appena richiesti (Microfono e Riconoscimento vocale), poi ripremi il microfono.');return;}
-    if(r<0){add('assistant','Dettatura on-device non disponibile. Attiva la Dettatura italiana (anche "on device") in Impostazioni di Sistema → Tastiera → Dettatura, e concedi Microfono e Riconoscimento vocale a Gephid.');return;}
-    recording=true;$('mic').classList.add('rec');$('mic').setAttribute('aria-pressed','true');
-    dictBase=inp.value?(inp.value.replace(/\s*$/,'')+' '):'';
-    dictTimer=setInterval(async()=>{try{const t=await gephidDictText();inp.value=dictBase+t;grow();updateSendState();scrollDown();}catch(e){}},300);
-  };
-
-  // ---- EXPORT: chat intera (header ⬇) o singolo messaggio (⬇ sulla bolla) in MD/TXT/HTML/PDF ----
-  let exportTarget=[];
-  function renderMsgHtml(m){const h=safeHtml(m.content);const safe=h!==null?h:('<pre style="white-space:pre-wrap;font-family:inherit;margin:0">'+escapeHtml(m.content)+'</pre>');const who=m.role==='user'?'Tu':'Gephid';const bg=m.role==='user'?'#eef1f6':'#f4f7ff';return '<div style="margin:14px 0;padding:12px 16px;border-radius:12px;background:'+bg+';border:1px solid #e1e7f2"><div style="color:#4169e1;font-weight:700;font-size:.82em;margin-bottom:6px">'+who+'</div>'+safe+'</div>';}
-  function fullHtml(msgs){return '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Chat Gephid</title></head><body style="font-family:-apple-system,Segoe UI,sans-serif;max-width:760px;margin:30px auto;padding:0 16px;color:#1a1f29"><h2 style="color:#4169e1">Chat — Gephid</h2>'+msgs.map(renderMsgHtml).join('')+'</body></html>';}
-  function mdOf(msgs){return msgs.map(m=>(m.role==='user'?'**Tu:** ':'**Gephid:**\n\n')+m.content).join('\n\n---\n\n');}
-  function txtOf(msgs){return msgs.map(m=>(m.role==='user'?'Tu: ':'Gephid:\n')+m.content).join('\n\n');}
-  // Il download del browser non funziona in WKWebView: salva lato server in ~/Downloads.
-  async function saveToDownloads(name,content,b64){
-    try{return await(await fetch('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:name,content:content,b64:!!b64})})).json();}
-    catch(e){return {ok:false,error:String(e)};}
-  }
-  // Salva chiedendo dove (pannello di salvataggio nativo macOS); fallback a ~/Downloads.
-  async function saveAsFile(defName,content,b64){
-    if(window.gephidSaveFile){
-      let path='';try{path=await gephidSaveFile(defName);}catch(e){}
-      if(!path)return {cancelled:true};
-      try{return await(await fetch('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:path,filename:defName,content:content,b64:!!b64})})).json();}
-      catch(e){return {ok:false,error:String(e)};}
-    }
-    return await saveToDownloads(defName,content,b64);
-  }
-  async function doExport(msgs,fmt){
-    if(!msgs||!msgs.length)return;
-    const ts=new Date().toISOString().slice(0,16).replace(/[:T]/g,'-');const base='gephid-'+ts;
-    let name,content,b64=false;
-    if(fmt==='md'){name=base+'.md';content=mdOf(msgs);}
-    else if(fmt==='txt'){name=base+'.txt';content=txtOf(msgs);}
-    else if(fmt==='html'){name=base+'.html';content=fullHtml(msgs);}
-    else if(fmt==='pdf'){
-      if(!window.html2pdf){addError('PDF non disponibile: libreria non caricata.');return;}
-      const el=document.createElement('div');el.style.color='#1a1f29';el.innerHTML='<h2 style="color:#4169e1;font-family:sans-serif">Chat - Gephid</h2>'+msgs.map(renderMsgHtml).join('');
-      const uri=await html2pdf().set({margin:10,html2canvas:{scale:2},jsPDF:{unit:'mm',format:'a4',orientation:'portrait'}}).from(el).outputPdf('datauristring');
-      name=base+'.pdf';content=(uri.split(',')[1]||'');b64=true;
-    } else return;
-    const r=await saveToDownloads(name,content,b64);
-    if(r&&r.ok)add('assistant','Salvato in '+r.path+' (aperto nel Finder).');
-    else addError('Salvataggio non riuscito'+(r&&r.error?': '+r.error:'')+'.');
-  }
-  function openExportMenu(x,y,msgs,single){exportTarget=msgs;const m=$('expmenu');
-    // per-messaggio (single): solo formati; intestazione: anche Copia/Compatta di tutta la chat
-    m.querySelectorAll('[data-f="copy"],[data-f="compact"]').forEach(b=>b.style.display=single?'none':'block');
-    m.classList.add('on');
-    const w=m.offsetWidth||160,h=m.offsetHeight||220;
-    m.style.left=Math.max(8,Math.min(x,innerWidth-w-8))+'px';
-    m.style.top=Math.max(8,Math.min(y,innerHeight-h-8))+'px';}
-  $('export').onclick=e=>{e.stopPropagation();const r=e.target.getBoundingClientRect();openExportMenu(r.right-150,r.bottom+6,history.slice(),false);};
-  document.querySelectorAll('#expmenu button').forEach(b=>b.onclick=()=>{
-    if(b.dataset.f==='copy'){const txt=exportTarget.length===1?exportTarget[0].content:txtOf(exportTarget);if(navigator.clipboard)navigator.clipboard.writeText(txt).catch(()=>{});}
-    else if(b.dataset.f==='compact')compactChat();
-    else doExport(exportTarget,b.dataset.f);
-    $('expmenu').classList.remove('on');});
-  // chiudi il menu cliccando fuori (gli apri-menu fanno stopPropagation), con Escape o allo scroll
-  function closeExportMenu(){$('expmenu').classList.remove('on');}
-  document.addEventListener('click',e=>{if(!e.target.closest('#expmenu'))closeExportMenu();});
-  document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeExportMenu();$('ov').classList.remove('on');}});
-  chat.addEventListener('scroll',closeExportMenu);
-  window.addEventListener('scroll',closeExportMenu,true);
-  window.addEventListener('resize',closeExportMenu);
-
-  // ---- COMPATTA chat in 1 prompt (per riprenderla altrove / con un altro LLM) ----
-  let compactSuggest=null;
-  function addCompactSuggest(){
-    if(compactSuggest)compactSuggest.remove();
-    if(history.length<2)return;
-    compactSuggest=document.createElement('div');compactSuggest.className='compactsug';
-    compactSuggest.innerHTML='<a id="csg">Compatta in 1 prompt</a> — riassume la chat in un unico prompt per continuarla altrove';
-    compactSuggest.querySelector('#csg').onclick=()=>compactChat();
-    chat.appendChild(compactSuggest);scrollDown();
-  }
-  async function compactChat(){
-    if(busy||!history.length)return;
-    if(compactSuggest){compactSuggest.remove();compactSuggest=null;}
-    busy=true;setStopMode(true);
-    const th=add('thinking','comprimo la conversazione...');
-    let acc='',dmsg=null,typer=null,err=null,aborted=false;
-    aborter=new AbortController();
-    const onDelta=a=>{acc=a;if(!dmsg){th.remove();dmsg=add('assistant','');typer=makeTyper(dmsg);}typer.push(acc);};
-    try{
-      try{const r=await streamNDJSON('/api/compact',{messages:history},onDelta,aborter.signal);err=r.err;}
-      catch(e){if(e&&e.name==='AbortError')aborted=true;else err=String(e);}
-      if(th.parentNode)th.remove();
-      if(typer)await typer.finish();
-      if(dmsg)dmsg.remove(); // lo rimostro formattato col prefisso e i pulsanti
-      if(err){addError('Errore: '+err);}
-      else if(acc){
-        const ts=new Date().toISOString().slice(0,16).replace(/[:T]/g,'-');
-        let copied=false;
-        if(navigator.clipboard){try{await navigator.clipboard.writeText(acc);copied=true;}catch(e){}}
-        const d=add('assistant','**Chat compattata**'+(copied?' — copiata negli appunti':'')+'. Incollala in un altro LLM (o qui) per riprendere:\n\n---\n\n'+acc);
-        const btn=document.createElement('button');btn.className='inlinebtn';btn.textContent='Salva come file…';
-        btn.onclick=async()=>{
-          btn.disabled=true;btn.textContent='salvataggio…';
-          const r=await saveAsFile('gephid-compact-'+ts+'.txt',acc,false);
-          if(r&&r.cancelled){btn.disabled=false;btn.textContent='Salva come file…';}
-          else if(r&&r.ok){btn.textContent='Salvato ✓';setTimeout(()=>{btn.textContent='Salva come file…';btn.disabled=false;},2200);}
-          else{btn.disabled=false;btn.textContent='Riprova salvataggio';}
-        };
-        d.appendChild(btn);scrollDown();
-      }
-    }finally{
-      busy=false;aborter=null;setStopMode(false);
-    }
-  }
-
-  // Sblocca la UI quando il modello è pronto: dissolve l'overlay, riabilita il composer.
-  function markModelReady(){
-    if(modelReady)return;
-    modelReady=true;
-    const ov=$('bootov');if(ov){ov.classList.add('gone');setTimeout(()=>{if(ov.parentNode)ov.remove();},450);}
-    inp.disabled=false;inp.placeholder='Scrivi un messaggio...';updateSendState();
-    if(!$('ov').classList.contains('on'))inp.focus(); // non rubare il focus se le Impostazioni sono aperte (reload a caldo)
-  }
-  // Overlay d'avvio: il server risponde subito (model_ok=false) mentre i pesi salgono in RAM sul main
-  // thread. Facciamo polling finché model_ok=true (sblocca) o model_err (mostra l'errore in overlay).
-  async function bootGate(){
-    const ov=$('bootov');if(!ov){markModelReady();return;}
-    const bt=ov.querySelector('.bt'),bm=$('bootmsg'),t0=Date.now();
-    // mostra uno stato terminale nell'overlay con un pulsante d'azione (l'overlay copre tutto, quindi
-    // i controlli sotto — es. Impostazioni — sono irraggiungibili: serve un pulsante qui dentro)
-    function bootFail(title,html,btnLabel,btnFn){
-      if(bt)bt.textContent=title;
-      const sp=ov.querySelector('.bsp');if(sp)sp.remove();
-      if(bm)bm.innerHTML=html;
-      const b=document.createElement('button');b.className='inlinebtn';b.textContent=btnLabel;b.onclick=btnFn;ov.appendChild(b);
-    }
-    const iv=setInterval(()=>{if(bt&&!modelReady)bt.textContent='Carico il modello… ('+Math.floor((Date.now()-t0)/1000)+'s)';},1000);
-    let fails=0;
-    while(!modelReady){
-      try{
-        const h=await(await fetch('/api/health')).json();
-        fails=0;
-        if(h.model_ok){clearInterval(iv);markModelReady();return;}
-        if(h.model_err){clearInterval(iv);
-          bootFail('Modello non caricato',
-            'Impossibile caricare <b>'+escapeHtml(h.model||'')+'</b>.<br>'+escapeHtml(h.model_err)+'<br><br>Cambia modello dalle Impostazioni e ricaricalo.',
-            'Apri Impostazioni',()=>{ov.classList.add('gone');setTimeout(()=>{if(ov.parentNode)ov.remove();},450);$('gear').click();});
-          return;}
-      }catch(e){
-        // backend irraggiungibile (morto dopo l'apertura della finestra): dopo ~12s offri di ricaricare
-        if(++fails>=20){clearInterval(iv);
-          bootFail('Backend non raggiungibile',
-            'Gephid non riesce a contattare il backend. Potrebbe essersi chiuso: controlla i log o riprova.',
-            'Ricarica',()=>location.reload());
-          return;}
-      }
-      await new Promise(r=>setTimeout(r,600));
-    }
-  }
-
-  applyDict();
-  updateSendState();
-  loadConfig();
-  loadModels();
-  bootGate();
-</script>
-</body></html>"""
-
-LOGO_SVG = '''<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:100%">
-<rect x="40" y="40" width="432" height="432" rx="104" fill="#4169E1"/>
-<g transform="rotate(13.37 256 256)" fill="#fff">
-<ellipse cx="254" cy="210" rx="58" ry="52"/>
-<path d="M247 250 L266 250 L302 372 Q307 391 287 388 L227 378 Q213 376 219 359 Z"/></g></svg>'''
-
-FULL_PAGE = PAGE.replace("__LOGO__", LOGO_SVG)  # precompilata una volta (il logo è costante)
-
-# Redesign "Terminale × Cifra": la UI di default vive in page.html accanto a questo file, servita
-# su / e su /new (la vecchia UI inline resta su /old). Riletta da disco quando il file cambia
+# La UI vive in page.html accanto a questo file, servita su / (e /new, alias storico). Riletta da disco quando il file cambia
 # (hot-reload in dev, così si itera senza riavviare); in bundle il file è statico.
 _PAGE_CACHE = {"mtime": None, "html": None}
 def _load_new_page():
@@ -1900,6 +1117,17 @@ def _load_new_page():
         return _PAGE_CACHE["html"]
     except Exception as e:
         return "<!doctype html><meta charset=utf-8><body style='font-family:monospace;padding:40px'>page.html non trovata: " + str(e) + "</body>"
+
+def safe_save_target(target, home=None):
+    """Percorso scelto nel pannello di salvataggio nativo -> (path, None) o (None, errore).
+    Solo dentro la home (mai su path di sistema), symlink risolti, cartella esistente."""
+    target = os.path.realpath(os.path.expanduser(str(target)))
+    home = os.path.realpath(home or os.path.expanduser("~"))
+    if target == home or not target.startswith(home + os.sep):
+        return None, "Percorso non consentito (solo dentro la home)."
+    if not os.path.isdir(os.path.dirname(target)):
+        return None, "Cartella di destinazione inesistente."
+    return target, None
 
 # CSP: l'output del modello è untrusted (prompt injection nei documenti allegati). Il markdown
 # reso non deve poter caricare risorse esterne (esfiltrazione via <img src>): tutto resta 'self'.
@@ -1923,8 +1151,6 @@ class H(http.server.BaseHTTPRequestHandler):
             self._send(403, "forbidden", "text/plain"); return
         if self.path == "/" or self.path == "/new":  # nuova UI "Terminale × Cifra" (default)
             self._send(200, _load_new_page(), "text/html; charset=utf-8", {"Content-Security-Policy": CSP})
-        elif self.path == "/old":  # vecchia UI, fallback durante la transizione
-            self._send(200, FULL_PAGE, "text/html; charset=utf-8", {"Content-Security-Policy": CSP})
         elif self.path == "/api/config":
             self._send(200, json.dumps(config_payload()))
         elif self.path == "/api/health":
@@ -1998,22 +1224,29 @@ class H(http.server.BaseHTTPRequestHandler):
                 reveal = bool(req.get("reveal", False))  # "formazione dal rumore" (unmasking-draft)
                 cont = bool(req.get("cont", False))      # continuazione di un parziale interrotto
                 think = bool(req.get("think", False))    # "Ragiona": enable_thinking del template
-                attach = req.get("attach") or []
-                img_paths = []
-                for i in attach:
-                    e = INGEST.get(i)
-                    if e and e["kind"] == "image": img_paths.extend(e.get("paths") or [])
-                doc_ids = [i for i in attach if i in INGEST and INGEST[i]["kind"] == "doc"]
+                # attach = TUTTI gli allegati della chat (il frontend li rimanda a ogni turno): un documento
+                # allegato al turno 1 deve valere anche al turno 5. Prima valeva solo nel turno in cui era
+                # allegato, e alla domanda successiva il modello inventava (test: "ZAFFIRO-7731" -> "Alpha-7").
+                attach = [str(i) for i in (req.get("attach") or [])][:32]
+                with INGEST_LOCK:
+                    missing = [i for i in attach if i not in INGEST]
+                    img_paths = [p for i in attach if i in INGEST and INGEST[i]["kind"] == "image"
+                                 for p in (INGEST[i].get("paths") or [])][-6:]  # tetto: le immagini costano token
+                    doc_ids = [i for i in attach if i in INGEST and INGEST[i]["kind"] == "doc"]
+                if missing:  # backend riavviato (gli allegati vivono solo in RAM): dillo, mai rispondere senza
+                    emit({"error": "Alcuni allegati di questa chat non sono più in memoria (Gephid si è riavviato). "
+                                   "Riallegali e riprova.", "missing": missing}); return
+                _touch_ingest(attach)
                 raw_msgs = req.get("messages", [])
                 def work(job):  # gira sul thread-worker del modello
-                    msgs = fit_context(raw_msgs, chat_id, on_status=lambda s: job.q.put(("status", s)))
-                    # in continuazione l'ultimo messaggio è l'assistant parziale: non toccarlo col contesto-documenti
-                    if doc_ids and not (cont and msgs and msgs[-1].get("role") == "assistant"):
-                        doc_ctx = build_doc_context(doc_ids, lambda s: job.q.put(("status", s)), job.cancel)
-                        if doc_ctx and msgs:
-                            msgs = msgs[:-1] + [{"role": msgs[-1]["role"],
-                                                 "content": "Contesto dai documenti allegati:\n" + doc_ctx + "\n\n---\n\n" + msgs[-1]["content"]}]
-                    msgs = inject_system(msgs)  # pre-prompt: ancora il comportamento del modello (prima del guard, così conta nei token)
+                    status = lambda s: job.q.put(("status", s))
+                    doc_ctx = build_doc_context(doc_ids, status, job.cancel) if doc_ids else ""
+                    sysm = system_message(doc_ctx)
+                    systok = _ntok([sysm]) if sysm else 0
+                    # la storia ha il budget che resta dopo istruzioni+documenti (e un margine per la risposta)
+                    hist_budget = max(2048, min(CTX_BUDGET, SAFE_SEQ - systok - 4096))
+                    msgs = fit_context(raw_msgs, chat_id, on_status=status, budget=hist_budget)
+                    if sysm: msgs = [sysm] + msgs
                     # Guard memoria GPU: attenzione ~seq^2, quindi prompt+output deve stare in SAFE_SEQ.
                     # Tieni il prompt entro un tetto (riducendo i documenti) e clampa i max token di output.
                     # Nota: usa una variabile nuova (eff_mtok), non riassegnare 'mtok' del closure (UnboundLocalError).
@@ -2026,8 +1259,6 @@ class H(http.server.BaseHTTPRequestHandler):
                             msgs = _fit_prompt(msgs, cap)
                             ptok = _ntok(msgs)
                         eff_mtok = max(TOK_MIN, min(mtok, SAFE_SEQ - ptok))  # prompt+output entro il buffer
-                    if doc_ids:
-                        job.q.put(("status", "Ho letto tutto il documento, scrivo la risposta…"))
                     def on_delta(d):
                         if job.cancel.is_set(): return False
                         job.q.put(("delta", d)); return True
@@ -2125,13 +1356,10 @@ class H(http.server.BaseHTTPRequestHandler):
             try:
                 target = req.get("path")
                 if target:
-                    target = os.path.realpath(os.path.expanduser(str(target)))
-                    home = os.path.realpath(os.path.expanduser("~"))
-                    if target == home or not target.startswith(home + os.sep):
-                        self._send(200, json.dumps({"ok": False, "error": "Percorso non consentito (solo dentro la home)."})); return
-                    if not os.path.isdir(os.path.dirname(target)):
-                        self._send(200, json.dumps({"ok": False, "error": "Cartella di destinazione inesistente."})); return
-                    path = target  # sovrascrittura consapevole: il pannello nativo l'ha già chiesta
+                    path, err = safe_save_target(target)
+                    if err:
+                        self._send(200, json.dumps({"ok": False, "error": err})); return
+                    # sovrascrittura consapevole: il pannello nativo l'ha già chiesta
                 else:
                     os.makedirs(DOWNLOADS_DIR, exist_ok=True)
                     path = os.path.join(DOWNLOADS_DIR, name)
@@ -2165,13 +1393,36 @@ class H(http.server.BaseHTTPRequestHandler):
                 emitR({"error": "Modello non valido."}); return
             def rwork(job):
                 global MODELO, PROC, TOK, MODEL, MODEL_OK, MODEL_ERR
+                # Libera PRIMA il modello attuale: tenerli entrambi in memoria raddoppia il picco
+                # (~56GB con l'8-bit) e su un Mac da 32-64GB il caricamento finiva in OOM.
+                # Se il nuovo non si carica, si ricarica il precedente (rollback).
+                prev = MODEL
+                job.q.put(("status", "Libero la memoria del modello attuale…"))
+                MODEL_OK = False
+                MODELO = PROC = TOK = None
+                SESSIONS.clear(); SUMMARY_CACHE.clear()  # contesto/cache non validi col nuovo modello
+                import gc; gc.collect()
+                try:
+                    import mlx.core as mx; mx.clear_cache()
+                except Exception: pass
                 job.q.put(("status", "Carico il modello " + new_model + "…"))
-                m, p = load(new_model)  # se fallisce, l'eccezione lascia intatto il modello attuale
+                try:
+                    m, p = load(new_model)
+                except Exception as e:
+                    job.q.put(("status", "Il nuovo modello non si carica: ripristino il precedente…"))
+                    try:
+                        m, p = load(prev)
+                    except Exception as e2:
+                        MODEL_ERR = str(e2)
+                        raise RuntimeError(f"Né il nuovo né il precedente modello si caricano: {e2}"[:300])
+                    MODELO, PROC = m, p
+                    TOK = p.tokenizer if hasattr(p, "tokenizer") else p
+                    MODEL_OK, MODEL_ERR = True, ""
+                    raise RuntimeError(f"Non riesco a caricare {new_model} ({str(e)[:160]}). Ripristinato {prev}.")
                 MODELO, PROC = m, p
                 TOK = p.tokenizer if hasattr(p, "tokenizer") else p
                 MODEL, MODEL_OK, MODEL_ERR = new_model, True, ""
                 CFG["model"] = new_model; save_config(CFG)
-                SESSIONS.clear(); SUMMARY_CACHE.clear()  # contesto/cache non validi col nuovo modello
                 job.q.put(("done", 0, 0))
             stream_job(Job(rwork), emitR)
         elif self.path == "/api/config":
@@ -2230,7 +1481,14 @@ class GephidServer(http.server.ThreadingHTTPServer):
     allow_reuse_address = True  # esplicito: al restart (supervisione del launcher) il bind sulla porta non deve fallire
 
 IS_BUNDLED = ".app/Contents/Resources" in os.path.realpath(__file__)  # True solo dentro la .app
-BUILD = "2026-07-26a"  # marker di build: compare in ~/gephid-backend.log per verificare la versione in uso
+def _build_label():
+    """Etichetta scritta da build.sh (data + commit): nel log dice quale versione gira davvero."""
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "build-info")) as f:
+            return f.read().strip() or "dev"
+    except Exception:
+        return "dev"
+BUILD = _build_label()
 
 def _launcher_watchdog():
     """Spegne il backend quando il launcher che lo ha avviato (il processo PADRE) muore:

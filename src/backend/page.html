@@ -120,6 +120,14 @@
   .dfrag .dtext{color:var(--text-soft)}
   .dfrag .dmask{display:inline-block;width:1.7em;height:.66em;margin:0 .14em;border-radius:4px;vertical-align:middle;opacity:.6;background:linear-gradient(90deg,var(--seg-off),var(--turn-stream),var(--seg-off));background-size:200% 100%;animation:shim 1.15s linear infinite}
   @keyframes shim{to{background-position:-200% 0}}
+  /* pensiero del modello: scorre mentre pensa, si compatta quando parte la risposta (clic = riapri) */
+  .thought{margin:0 0 14px;border-left:2px solid var(--border);padding:1px 0 1px 12px}
+  .thought .th-h{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;color:var(--dim);cursor:pointer;user-select:none}
+  .thought .th-h .ar{display:inline-block;transition:transform .15s}
+  .thought:not(.collapsed) .th-h .ar{transform:rotate(90deg)}
+  .thought.live .th-h{color:var(--live)}
+  .thought .th-b{white-space:pre-wrap;font-size:calc(var(--read-size)*.6);line-height:1.55;color:var(--dim);max-height:260px;overflow-y:auto;margin-top:7px}
+  .thought.collapsed .th-b{display:none}
   .stop{display:flex;align-items:center;gap:6px;color:var(--danger);border:1px solid var(--danger-border);background:var(--danger-bg);border-radius:8px;padding:5px 11px;cursor:pointer;font-family:inherit;font-size:10.5px}
   .stop .sq{width:9px;height:9px;border-radius:2px;background:var(--danger)}
 
@@ -138,6 +146,10 @@
   .achip .sep2{color:var(--dim2)} .achip .tk{color:var(--accent-text)} .achip .x{color:var(--dim2);cursor:pointer}
   .cmd{display:flex;align-items:center;gap:12px;background:var(--cmd-bg);border:1px solid var(--cmd-border);border-radius:14px;padding:12px 12px 12px 16px}
   .cmd.dim{opacity:.5}
+  .pill{font-size:12px;color:var(--dim);border:1px solid var(--border);background:transparent;border-radius:99px;padding:5px 11px;cursor:pointer;font-family:inherit;white-space:nowrap}
+  .pill:hover{border-color:var(--turn-stream)}
+  .pill.on{color:#fff;background:var(--accent);border-color:var(--accent)}
+  .achip.sent{opacity:.72;border-style:dashed}
   .cmd .prompt{font-size:22px;color:var(--live);font-weight:700;line-height:1}
   .cmd .ta{flex:1;background:transparent;border:none;outline:none;color:var(--text);font-size:var(--read-size);line-height:1.45;font-family:inherit;resize:none;max-height:150px;overflow-y:auto}
   .cmd .ta::placeholder{color:var(--dim2)}
@@ -246,7 +258,7 @@
     <div class="lk"><div><svg width="56" height="56" viewBox="0 0 24 24" fill="none"><path d="M8 10V7a4 4 0 0 1 8 0v3" stroke="#4169E1" stroke-width="2.1" stroke-linecap="round" stroke-dasharray="9 4" style="animation:gdash 1.6s linear infinite"></path><rect x="4.6" y="10" width="14.8" height="9.6" rx="3" fill="none" stroke="#4169E1" stroke-width="2.1" stroke-dasharray="11 5" style="animation:gdash 2.2s linear infinite"></rect></svg></div></div>
   </div>
   <div class="pct mono"><span id="ovPct">0</span><b>%</b></div>
-  <div class="mount mono" data-i18n="DiffusionGemma · 28 GB in memoria">DiffusionGemma · 28 GB into memory</div>
+  <div class="mount mono"><span id="ovModel">DiffusionGemma</span> · <span data-i18n="in memoria">into memory</span></div>
   <div class="ticker mono" data-scramble="NO-NET · 0xLOCAL · NO BYTE LEAVES">NO-NET · 0xLOCAL · NO BYTE LEAVES</div>
 </div>
 
@@ -270,6 +282,7 @@
   <div class="cmd" id="cmd">
     <span class="prompt mono">❯</span>
     <textarea class="ta" id="ta" rows="1" placeholder="Type a message…" data-i18n-ph="Scrivi un messaggio…" aria-label="Message" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+    <button class="pill" id="btnThink" aria-pressed="false" title="Think before answering (slower)" data-i18n-title="Ragiona prima di rispondere (più lento)"><span data-i18n="Ragiona">Think</span></button>
     <button class="iconbtn" id="btnMic" style="display:none" title="Dictation" aria-label="Voice dictation"><svg width="17" height="17" viewBox="0 0 24 24"><rect x="9" y="2.5" width="6" height="11" rx="3" stroke-width="2"></rect><path d="M5 11a7 7 0 0 0 14 0M12 18v3" stroke-width="2" stroke-linecap="round"></path></svg></button>
     <button class="iconbtn" id="btnAttach" title="Attach" aria-label="Attach files"><svg width="17" height="17" viewBox="0 0 24 24"><path d="M16 8.5 9.2 15.3a2.5 2.5 0 0 0 3.5 3.5l7-7a4.5 4.5 0 0 0-6.4-6.4l-7.2 7.2a6.5 6.5 0 0 0 9.2 9.2L19 18" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path></svg></button>
     <button class="sendbtn" id="btnSend" aria-label="Send message"><svg width="15" height="15" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"></path></svg></button>
@@ -383,7 +396,7 @@ window.__I18N__ = {
   "Off":"Off","Microphone":"Microfono","Generation":"Generazione","Max tokens":"Max token risposta",
   "OCR for scanned documents":"OCR per documenti scansionati","Advanced":"Avanzato","Max fidelity":"Massima fedeltà","Model":"Modello",
   "Save & load":"Salva e carica","Model loaded and ready.":"Modello caricato e pronto.",
-  "DiffusionGemma · 28 GB into memory":"DiffusionGemma · 28 GB in memoria","Couldn't start the model":"Non riesco ad avviare il modello",
+  "into memory":"in memoria","Couldn't start the model":"Non riesco ad avviare il modello",
   "Change the model in Settings":"Cambia il modello nelle Impostazioni","Backend unreachable":"Backend non raggiungibile","Reload":"Ricarica",
   "Getting Gephid ready":"Preparo Gephid","Pause":"Pausa","Resume":"Riprendi","Use a local folder":"Usa una cartella locale",
   "Start a new chat?":"Iniziare una nuova chat?","Export first":"Esporta prima","Cancel":"Annulla","Update":"Aggiorna",
@@ -417,6 +430,7 @@ function tr(en){ return (LANG==='it') ? (I18N[en]||en) : en; }
 function applyLang(lang){
   LANG=lang; localStorage.setItem('gephid-lang',lang); document.documentElement.lang=lang;
   document.querySelectorAll('[data-i18n]').forEach(n=>{ if(n._en===undefined)n._en=n.textContent; n.textContent=(lang==='it')?(n.getAttribute('data-i18n')||n._en):n._en; });
+  document.querySelectorAll('[data-i18n-title]').forEach(n=>{ if(n._ent===undefined)n._ent=n.getAttribute('title'); n.setAttribute('title',(lang==='it')?(n.getAttribute('data-i18n-title')||n._ent):n._ent); });
   document.querySelectorAll('[data-i18n-ph]').forEach(n=>{ if(n._en===undefined)n._en=n.getAttribute('placeholder'); n.setAttribute('placeholder',(lang==='it')?(n.getAttribute('data-i18n-ph')||n._en):n._en); });
   try{ if(typeof history!=='undefined' && history.length===0 && typeof renderWelcome==='function' && document.querySelector('#log .turn')) renderWelcome(); }catch(e){}
 }
@@ -462,6 +476,14 @@ document.addEventListener('click',function(e){const a=e.target.closest&&e.target
   e.preventDefault();e.stopPropagation();
   if(h)toast((LANG==='it'?'Link esterno bloccato (Gephid è offline): ':'External link blocked (Gephid is offline): ')+h.slice(0,90),true);
 },true);
+/* salvataggio: pannello nativo (l'utente sceglie nome e cartella) se c'è, altrimenti ~/Downloads */
+async function saveText(name,content,extra){
+  let path='';
+  if(window.gephidSaveFile){ try{ path=await gephidSaveFile(name); }catch(e){} $('#ta').focus(); if(!path) return false; }  // annullato
+  try{ const r=await(await fetch('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.assign({filename:name,content,path:path||undefined},extra||{}))})).json();
+    if(r.ok){ toast(tr('Saved to')+' '+String(r.path||'~/Downloads').replace(/^\/Users\/[^/]+/,'~')); return true; }
+    toast((LANG==='it'?'Salvataggio fallito: ':'Save failed: ')+(r.error||''),true); }catch(e){ toast(LANG==='it'?'Salvataggio fallito.':'Save failed.',true); }
+  return false; }
 async function copyText(s){ try{ if(navigator.clipboard){ await navigator.clipboard.writeText(s); return true; } }catch(e){}
   try{ const t=el('textarea'); t.value=s; t.style.cssText='position:fixed;opacity:0;top:0'; document.body.appendChild(t); t.select(); document.execCommand('copy'); t.remove(); return true; }catch(e){ return false; } }
 
@@ -527,18 +549,42 @@ function renderWelcome(){
   $('#log').innerHTML=''; const b=addTurn('gep');
   const m=el('div','msg soft'); m.innerHTML=(LANG==='it'?WELCOME_IT:WELCOME_EN); b.appendChild(m);
 }
-// persistenza chat: la conversazione vive anche dopo crash/ricarica/riavvio del backend
-function saveChat(){ try{ localStorage.setItem('gephid-chat', JSON.stringify(history)); }catch(e){} }
+// La chat corrente NON si salva su disco (scelta dell'utente: solo su richiesta). Vive in
+// sessionStorage: sopravvive a ricarica/riavvio del backend, sparisce alla chiusura dell'app.
+// Con la chat si tengono i metadati degli allegati (gli id: il testo sta nella RAM del backend).
+function saveChat(){ try{ sessionStorage.setItem('gephid-chat', JSON.stringify({chatId, history,
+  attachments: attachments.filter(a=>a.id).map(a=>({id:a.id,name:a.name,kind:a.kind,tokens:a.tokens,sent:!!a.sent}))})); }catch(e){} }
 function restoreChat(){
-  let saved; try{ saved=JSON.parse(localStorage.getItem('gephid-chat')||'[]'); }catch(e){ saved=[]; }
-  if(!Array.isArray(saved)||!saved.length) return false;
-  history=saved.slice(); $('#log').innerHTML='';
-  saved.forEach(h=>{ if(!h||!h.content) return;
+  try{ localStorage.removeItem('gephid-chat'); }catch(e){}  // vecchia persistenza permanente: non più usata
+  let saved; try{ saved=JSON.parse(sessionStorage.getItem('gephid-chat')||'null'); }catch(e){ saved=null; }
+  if(!saved||!Array.isArray(saved.history)||!saved.history.length) return false;
+  history=saved.history.slice(); if(saved.chatId) chatId=saved.chatId;
+  attachments=(saved.attachments||[]).map(a=>Object.assign({loading:false},a)); renderChips();
+  renderHistory(); return true;
+}
+function renderHistory(){
+  $('#log').innerHTML='';
+  history.forEach(h=>{ if(!h||!h.content) return;
     if(h.role==='user'){ const b=addTurn('user'); const m=el('div','msg'); m.textContent=h.content; b.appendChild(m); }
-    else{ const b=addTurn('gep'); const m=el('div','msg'); renderMd(m,h.content); m.dataset.src=h.content; b.appendChild(m);
+    else{ const b=addTurn('gep'); if(h.thought) b.appendChild(thoughtBox(h.thought,h.thoughtSecs,true));
+      const src=stripMarkers(h.content); const m=el('div','msg'); renderMd(m,src); m.dataset.src=src; b.appendChild(m);
       const meta=el('div','meta mono'); meta.innerHTML=META_COPY.replace('__COPY__',tr('Copy')).replace('__DL__',tr('Download')); b.appendChild(meta); }
   });
-  scrollDown(); return true;
+  scrollDown(true);
+}
+/* marcatori del template (canale di pensiero, turni): mai mostrarli. Il backend li toglie già; qui la
+   difesa vale anche per chat di prima del fix. */
+function stripMarkers(t){ return String(t||'').replace(/<\|channel>[\s\S]*?<channel\|>/g,'').replace(/<\|tool_call>[\s\S]*?<tool_call\|>/g,'').replace(/<\|?(channel|turn|tool_call|tool_response|tool|"|think)\|?>/g,''); }
+/* pannello del pensiero: aperto mentre pensa, compatto ("▸ Ha ragionato · Ns") a risposta iniziata */
+function thoughtBox(text,secs,collapsed){
+  const w=el('div','thought'+(collapsed?' collapsed':''));
+  const h=el('div','th-h mono'); h.setAttribute('role','button'); h.setAttribute('tabindex','0');
+  const b=el('div','th-b'); b.textContent=text||'';
+  w.appendChild(h); w.appendChild(b);
+  w.setHead=(live,sec)=>{ h.innerHTML='<span class="ar">▸</span>'+esc(live?(LANG==='it'?'Ragiono…':'Thinking…'):(LANG==='it'?'Ha ragionato':'Thought'))+(sec!=null?' · '+sec+'s':''); w.classList.toggle('live',!!live); };
+  w.setHead(false,secs);
+  h.onclick=()=>w.classList.toggle('collapsed');
+  return w;
 }
 
 /* marked tratta \( \) \[ \] come escape markdown e ne emette solo ( ) [ ]: i delimitatori LaTeX
@@ -604,7 +650,8 @@ async function send(){
     else if(cmd==='compact') compactChat();
     return; }
   if(attachments.some(a=>a.loading)) return; // ingest in corso: aspetta (i chip in ERRORE invece non bloccano)
-  const atts=attachments.filter(a=>a.id);
+  // gli allegati restano nella chat: "fresh" = appena aggiunti (mostrati nel turno), gli altri valgono comunque
+  const atts=attachments.filter(a=>a.id&&!a.sent);
   if(!txt && !atts.length) return;
   busy=true;  // guard anti doppio-invio: alza busy SUBITO (prima di qualunque await)
   if(recording) stopDict();  // ferma la dettatura: altrimenti il timer ri-riempie l'input col testo dettato
@@ -615,13 +662,14 @@ async function send(){
   if(atts.length){ atts.forEach(a=>{ const c=el('div','att mono'); c.innerHTML='<svg width="13" height="13" viewBox="0 0 24 24"><path d="M14 4v5h5" stroke-width="2" stroke-linejoin="round"></path><path d="M14 4H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9z" stroke-width="2" stroke-linejoin="round"></path></svg>'+esc(a.name)+' <span style="color:var(--dim2)">·</span> ✓ '+(a.tokens||0)+' tok'; ub.appendChild(c); }); }
   history.push({role:'user',content:phTxt}); saveChat();  // salva subito: il messaggio non si perde anche se la generazione fallisce
   $('#ta').value=''; $('#ta').style.height='auto';
-  const attachIds=atts.map(a=>a.id); attachments=[]; renderChips();
+  atts.forEach(a=>a.sent=true); renderChips(); saveChat();
   // finally: busy viene alzato QUI (guard anti doppio-invio) ma abbassato dentro generate(). Se
   // generate() esplodesse dopo, la UI resterebbe bloccata per sempre senza modo di sbloccarla.
-  try{ await generate({attach:attachIds}); }
+  try{ await generate({}); }
   finally{ if(busy) setBusy(false); }
 }
-let genAttach=[];
+// tutti gli allegati della chat vanno a OGNI turno: un documento allegato al turno 1 vale anche al 5
+function chatAttachIds(){ return attachments.filter(a=>a.id&&!a.err).map(a=>a.id); }
 
 const META_COPY='<span class="act" data-k="copy" role="button" tabindex="0"><svg width="13" height="13" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2" stroke-width="2"></rect><path d="M5 15V5a2 2 0 0 1 2-2h10" stroke-width="2" stroke-linecap="round"></path></svg>'+'__COPY__</span><span class="act" data-k="dl" role="button" tabindex="0"><svg width="13" height="13" viewBox="0 0 24 24"><path d="M12 4v11m0 0 4-4m-4 4-4-4M5 20h14" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path></svg>__DL__</span>';
 async function generate(opts){
@@ -637,7 +685,9 @@ async function generate(opts){
   body.className='stream-txt msg';  // così il markdown live ha i margini compatti di .msg
   setBusy(true);
   const t0=Date.now(); const base= opts.body?(body.dataset.src||body.textContent):''; let acc=base; let errObj=null, lastTot=curSteps, draft='', lastStep=0, statusHold=0, finalTps=0;
-  const attach = (opts.attach!==undefined)?opts.attach:genAttach; genAttach=attach;
+  const attach = chatAttachIds();
+  const think = localStorage.getItem('gephid-think')==='on';
+  let thought='', thBox=null, thT0=0, thSecs=null, missing=null;
   const reveal = (localStorage.getItem('gephid-reveal')!=='off');  // "formazione dal rumore"
   const eDnc=head.querySelector('.dnc'), eBlk=head.querySelector('.blk'), eSecs=head.querySelector('.secs'), eToks=foot.querySelector('.toks');
   let lastFilled=-1, lastPaint=0;
@@ -657,9 +707,15 @@ async function generate(opts){
   rafId=requestAnimationFrame(anim);
   aborter=new AbortController();
   try{
-    await streamNDJSON('/api/chat',{chat_id:chatId,messages:history,steps:curSteps,max_tokens:curMaxTok,attach:attach,reveal:reveal,cont:!!opts.cont},
+    await streamNDJSON('/api/chat',{chat_id:chatId,messages:history.map(h=>({role:h.role,content:h.content})),steps:curSteps,max_tokens:curMaxTok,attach:attach,reveal:reveal,cont:!!opts.cont,think:think},
       function(o){
-        if(o.delta!==undefined){ acc+=String(o.delta).replace(/<\/?(bos|eos|pad|unk|mask|s|start_of_turn|end_of_turn|unused\d*)>/gi,''); draft=''; paintStream(false); setSecs(); liveTps(); }
+        if(o.thought!==undefined){
+          if(!thBox){ thBox=thoughtBox('',null,false); thT0=Date.now(); sb.insertBefore(thBox,body); }
+          thought+=o.thought; const tb=thBox.querySelector('.th-b'); tb.textContent=thought; tb.scrollTop=tb.scrollHeight;
+          thBox.setHead(true,Math.round((Date.now()-thT0)/1000)); scrollDown(); }
+        else if(o.delta!==undefined){
+          if(thBox&&thSecs===null){ thSecs=Math.max(1,Math.round((Date.now()-thT0)/1000)); thBox.setHead(false,thSecs); thBox.classList.add('collapsed'); }  // parte la risposta: il pensiero si compatta
+          acc+=stripMarkers(String(o.delta)).replace(/<\/?(bos|eos|pad|unk|mask|s|start_of_turn|end_of_turn|unused\d*)>/gi,''); draft=''; paintStream(false); setSecs(); liveTps(); }
         else if(o.diff){ const d=o.diff;
           if(d.total_steps) lastTot=d.total_steps;
           if(d.step){ animOn=false; lastStep=d.step; eDnc.textContent=d.step+'/'+lastTot; paintBar(Math.round(d.step/lastTot*32)); setSecs(); }
@@ -668,12 +724,16 @@ async function generate(opts){
           if(d.block!==undefined) eBlk.textContent=(d.block+1);
           liveTps();
         }
-        else if(o.error){ errObj=o.error; }
+        else if(o.error){ errObj=o.error; if(o.missing) missing=o.missing; }
         else if(o.done){ if(o.tps) finalTps=o.tps; }
         else if(o.status){ const st=window.trStatus?trStatus(o.status,LANG):o.status; eSecs.textContent=st; statusHold=Date.now()+1700; }
       }, aborter.signal);
   }catch(e){ if(!genStopped && !errObj) errObj=(LANG==='it'?'Connessione interrotta. Riprova.':'Connection lost. Try again.'); }
   animOn=false; cancelAnimationFrame(rafId); draft='';
+  if(thBox&&thSecs===null){ thSecs=Math.max(1,Math.round((Date.now()-thT0)/1000)); thBox.setHead(false,thSecs); thBox.classList.add('collapsed'); }
+  if(missing){  // backend riavviato: gli allegati (in RAM) non ci sono più -> chip in errore, va riallegato
+    attachments.forEach(a=>{ if(missing.includes(a.id)){ a.err=(LANG==='it'?'non più in memoria: riallega':'no longer in memory: re-attach'); a.id=null; } });
+    renderChips(); saveChat(); }
   setBusy(false); aborter=null; scrollDown();
   head.remove(); bar.remove(); foot.remove();
   if(errObj){  // OOM / errore -> card di recupero
@@ -694,8 +754,9 @@ async function generate(opts){
   }
   renderMd(body,acc||''); body.className='msg'; body.dataset.src=acc;  // sorgente markdown grezza per un eventuale Continue
   // su Continue aggiorna l'assistant esistente invece di aggiungerne uno nuovo
-  if(opts.cont && history.length && history[history.length-1].role==='assistant') history[history.length-1].content=acc;
-  else history.push({role:'assistant',content:acc});
+  const entry={role:'assistant',content:acc}; if(thought){ entry.thought=thought; entry.thoughtSecs=thSecs; }
+  if(opts.cont && history.length && history[history.length-1].role==='assistant') Object.assign(history[history.length-1],{content:acc});
+  else history.push(entry);
   saveChat();  // persiste la risposta completa
   if(genStopped){  // interrotto -> tieni il parziale + Regenerate/Continue
     const f=el('div','meta mono');
@@ -727,7 +788,7 @@ async function streamNDJSON(url,bodyObj,onObj,signal){
 $('#btnSend').onclick=send;
 $('#ta').addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); send(); } });
 $('#ta').addEventListener('input',function(){ this.style.height='auto'; this.style.height=Math.min(150,this.scrollHeight)+'px'; });  // 150 = max-height CSS della .ta
-function newChat(){ history=[]; attachments=[]; genAttach=[]; $('#chiprow').innerHTML=''; chatId=(crypto.randomUUID?crypto.randomUUID():'c'+Date.now()); saveChat(); renderWelcome(); updateSend(); }
+function newChat(){ history=[]; attachments=[]; $('#chiprow').innerHTML=''; chatId=(crypto.randomUUID?crypto.randomUUID():'c'+Date.now()); saveChat(); renderWelcome(); updateSend(); }
 $('#btnNew').onclick=()=>{ if(busy)return; if(history.length>0){ $('#confirm').classList.remove('hidden'); const c=$('#cfCancel'); if(c)c.focus(); } else newChat(); };
 $('#cfCancel').onclick=()=>$('#confirm').classList.add('hidden');
 $('#confirm').addEventListener('click',e=>{ if(e.target===$('#confirm'))$('#confirm').classList.add('hidden'); });
@@ -737,10 +798,11 @@ $('#cfExport').onclick=()=>{ $('#confirm').classList.add('hidden'); toggleExport
 /* ---- attachments (real ingest) ---- */
 function fmtTok(n){ return n>=1000?(n/1000).toFixed(1).replace(/\.0$/,'')+'k':String(n); }
 function updateSend(){ const loading=attachments.some(a=>a.loading); const sb=$('#btnSend');
-  if(!busy){ sb.classList.toggle('spin',loading); sb.disabled = loading || (!$('#ta').value.trim() && !attachments.some(a=>a.id)); }
+  if(!busy){ sb.classList.toggle('spin',loading); sb.disabled = loading || (!$('#ta').value.trim() && !attachments.some(a=>a.id&&!a.sent)); }
 }
 function renderChips(){ const c=$('#chiprow'); c.innerHTML='';
-  attachments.forEach(a=>{ const ch=el('div','achip mono'+(a.err?' err':''));
+  attachments.forEach(a=>{ const ch=el('div','achip mono'+(a.err?' err':'')+(a.sent&&!a.err?' sent':''));
+    if(a.sent&&!a.err) ch.title=(LANG==='it'?'Allegato a questa chat: vale per tutte le domande':'Attached to this chat: used for every question');
     if(a.loading){ ch.appendChild(el('span','spin')); }
     else if(!a.err){ const ok=el('span','ok'); ok.textContent='✓'; ch.appendChild(ok); }
     const nm=el('span'); nm.textContent=a.name; ch.appendChild(nm);
@@ -751,7 +813,7 @@ function renderChips(){ const c=$('#chiprow'); c.innerHTML='';
     const x=el('span','x'); x.textContent='✕'; x.setAttribute('role','button'); x.setAttribute('tabindex','0'); x.setAttribute('aria-label',a.loading?'Cancel reading':'Remove attachment');
     x.onclick=()=>{ if(a.loading){ if(a.ctrl)try{a.ctrl.abort();}catch(e){}
       if(a.token)fetch('/api/ingest/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:a.token})}).catch(()=>{}); }  // ferma anche l'OCR lato server
-      attachments=attachments.filter(z=>z!==a); renderChips(); }; ch.appendChild(x);
+      attachments=attachments.filter(z=>z!==a); renderChips(); saveChat(); }; ch.appendChild(x);
     c.appendChild(ch); });
   updateSend();
 }
@@ -761,7 +823,7 @@ async function ingestOne(body,name){ const a={id:null,name:name,tokens:0,loading
   body.cancel_token=a.token;
   attachments.push(a); renderChips();
   try{ const r=await(await fetch('/api/ingest',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),signal:a.ctrl&&a.ctrl.signal})).json();
-    if(r.error){ a.loading=false; a.err=r.error.slice(0,70); } else { a.loading=false; a.id=r.id; a.kind=r.kind; a.tokens=r.tokens||0; a.ready=true;
+    if(r.error){ a.loading=false; a.err=r.error.slice(0,70); } else { a.loading=false; a.id=r.id; a.kind=r.kind; a.tokens=r.tokens||0; a.ready=true; saveChat();
       if(r.scanned_pages)toast((LANG==='it'?'OCR su ':'OCR on ')+r.ocr_pages+' / '+r.scanned_pages+(LANG==='it'?' pagine scansionate':' scanned pages'),true); }  // taglio dichiarato, mai silenzioso
   }catch(e){
     if(e&&e.name==='AbortError'){ attachments=attachments.filter(z=>z!==a); }  // annullato dall'utente: via il chip
@@ -773,7 +835,9 @@ $('#btnAttach').onclick=async()=>{
   if(window.gephidOpenFiles){ let s=''; try{s=await gephidOpenFiles();}catch(e){} (s||'').split('\n').filter(Boolean).forEach(p=>ingestOne({path:p},p.split('/').pop())); $('#ta').focus(); }
   else $('#fileinput').click();
 };
-async function ingestFileObj(f){ const b64=await new Promise(res=>{const r=new FileReader();r.onload=()=>res(String(r.result).split(',')[1]);r.readAsDataURL(f);}); ingestOne({filename:f.name,content:b64},f.name); }
+async function ingestFileObj(f){
+  if(f.size>58*1024*1024){ attachments.push({id:null,name:f.name,err:(LANG==='it'?'troppo grande da trascinare (max ~58MB): usa la graffetta':'too large to drop (max ~58MB): use the paperclip')}); renderChips(); return; }
+  const b64=await new Promise(res=>{const r=new FileReader();r.onload=()=>res(String(r.result).split(',')[1]);r.readAsDataURL(f);}); ingestOne({filename:f.name,content:b64},f.name); }
 $('#fileinput').onchange=async e=>{ const files=[...e.target.files]; e.target.value=''; for(const f of files) await ingestFileObj(f); };
 /* drag & drop allegati (evidenzia la command bar, ingest al drop).
    preventDefault SEMPRE: un drop non gestito (testo/URL) farebbe navigare la WKWebView via dalla UI. */
@@ -782,6 +846,11 @@ $('#fileinput').onchange=async e=>{ const files=[...e.target.files]; e.target.va
 document.addEventListener('drop',async e=>{ e.preventDefault(); $('#cmd').style.borderColor=''; $('#cmd').style.background='';
   if(!e.dataTransfer||!e.dataTransfer.files.length)return; for(const f of [...e.dataTransfer.files]) await ingestFileObj(f); });
 $('#ta').addEventListener('input',updateSend);
+
+/* ---- "Ragiona" (enable_thinking): default OFF, Gephid è per le robe veloci ---- */
+function applyThink(){ const on=localStorage.getItem('gephid-think')==='on'; const b=$('#btnThink'); b.classList.toggle('on',on); b.setAttribute('aria-pressed',on?'true':'false'); }
+$('#btnThink').onclick=()=>{ localStorage.setItem('gephid-think',localStorage.getItem('gephid-think')==='on'?'off':'on'); applyThink(); $('#ta').focus(); };
+applyThink();
 
 /* ---- dictation (Go binds) ---- */
 let recording=false,dictTimer=null,dictBase='',recStart=0;
@@ -822,7 +891,7 @@ $('#log').addEventListener('click',e=>{ const act=e.target.closest('.act'); if(!
   // sorgente markdown grezza (dataset.src) quando c'è: il textContent del DOM reso duplica le formule KaTeX
   const txt=body?(body.dataset.src||body.textContent):'';
   if(act.dataset.k==='copy'){ copyText(txt).then(ok=>{ if(ok)toast(tr('Copied')); }); }
-  else if(act.dataset.k==='dl'){ const name='gephid-'+Date.now()+'.md'; fetch('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:name,content:txt})}).then(r=>r.json()).then(r=>{if(r.ok)toast(tr('Saved to')+' ~/Downloads');}); }
+  else if(act.dataset.k==='dl'){ saveText('gephid-'+Date.now()+'.md',txt); }
 });
 
 /* ============ startup health flow ============ */
@@ -833,7 +902,7 @@ function pollHealth(){
     if(g!==healthGen) return;  // un pollHealth più recente ha preso il controllo
     try{ const h=await (await fetch('/api/health')).json();
       if(g!==healthGen) return;
-      healthFails=0; if(h.model) curModel=h.model; $('#ovBackend').classList.add('hidden');  // risposta ricevuta: backend di nuovo raggiungibile
+      healthFails=0; if(h.model){ curModel=h.model; const om=$('#ovModel'); if(om) om.textContent=String(h.model).split('/').pop().replace(/-it-|-MLX-?/gi,' ').trim(); } $('#ovBackend').classList.add('hidden');  // risposta ricevuta: backend di nuovo raggiungibile
       if(h.model_ok){ loadErrDismissed=false; if(window.__matComplete)__matComplete(); ['#ovStartup','#ovDownload','#ovLoadErr'].forEach(s=>$(s).classList.add('hidden')); setTimeout(tick,4000); return; }  // heartbeat continuo: rileva quando il backend torna su e fa sparire l'overlay
       if(h.model_err){ showOverlayErr('load-error',h); setTimeout(tick,2500); return; }  // il poll NON muore: se l'utente ripara il modello (Salva e carica) l'overlay sparisce da solo
       if(h.needs_download){ showDownload(); return; }
@@ -976,7 +1045,7 @@ function toggleExport(){ let m=$('#expmenu'); if(m){ m.remove(); return; }
 }
 document.addEventListener('click',e=>{ const m=$('#expmenu'); if(m&&!m.contains(e.target)&&e.target!==$('#btnExport'))m.remove(); });
 ['scroll','resize'].forEach(ev=>window.addEventListener(ev,()=>{ const m=$('#expmenu'); if(m)m.remove(); },true));  // popup fuori posto su scroll/resize -> chiudi
-function chatToText(){ return history.map(h=>(h.role==='user'?'You: ':'Gephid: ')+h.content).join('\n\n'); }
+function chatToText(){ return history.map(h=>(h.role==='user'?'You: ':'Gephid: ')+stripMarkers(h.content)).join('\n\n'); }
 // documento HTML formattato (markdown reso) per export HTML e PDF
 function chatToHTMLDoc(){
   const css='<meta charset="utf-8"><style>'
@@ -1001,7 +1070,7 @@ function chatToHTMLDoc(){
     +'<div class="hsub">'+esc(modelName)+' · '+(it?'esportato il ':'exported ')+esc(date)+'</div></div>';
   let body='<div class="doc">'+header;
   history.forEach(h=>{ const role=h.role==='user'?'You':'Gephid'; const cls=h.role==='user'?'user':'gep';
-    const inner=(window.marked&&window.DOMPurify)?DOMPurify.sanitize(marked.parse(mathEscape(h.content||''))):esc(h.content||'').replace(/\n/g,'<br>');
+    const inner=(window.marked&&window.DOMPurify)?DOMPurify.sanitize(marked.parse(mathEscape(stripMarkers(h.content)))):esc(stripMarkers(h.content)).replace(/\n/g,'<br>');
     body+='<div class="turn '+cls+'"><div class="role">'+role+'</div><div class="b">'+inner+'</div></div>'; });
   return css+body+'</div>';  // footer NON nel flusso: per il PDF è per-pagina (backend), per l'HTML lo aggiunge doExport
 }
@@ -1010,20 +1079,12 @@ async function doExport(kind){
   if(kind==='compact'){ await compactChat(); return; }
   if(!history.length){ toast(LANG==='it'?'Niente da esportare.':'Nothing to export.',true); return; }
   const name='gephid-'+Date.now()+'.'+kind;
-  const okMsg=()=>toast(tr('Saved to')+' ~/Downloads · '+tr('opening Finder…'));
-  const failMsg=()=>toast(LANG==='it'?'Esportazione fallita.':'Export failed.',true);
-  if(kind==='pdf'){  // PDF generato LATO SERVER da HTML (fitz): testo selezionabile, niente html2canvas vuoto
-    try{
-      const r=await(await fetch('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:name,content:chatToHTMLDoc(),pdf:true,footer:(LANG==='it'?'100% in locale, offline':'100% local, offline')})})).json();
-      r.ok?okMsg():failMsg();
-    }catch(e){ failMsg(); }
-    return;
-  }
+  if(kind==='pdf'){  // PDF generato LATO SERVER da HTML (fitz): testo selezionabile
+    await saveText(name,chatToHTMLDoc(),{pdf:true,footer:(LANG==='it'?'100% in locale, offline':'100% local, offline')}); return; }
   // md / txt = testo; html = documento formattato
   const htmlFtr='<div style="margin-top:24px;padding-top:10px;border-top:1px solid #e3e8f0;font:10px \'Courier New\',monospace;color:#9aa3b2;text-align:center">'+(LANG==='it'?'100% in locale, offline':'100% local, offline')+'</div>';
   const content = kind==='html' ? '<!doctype html><html>'+chatToHTMLDoc()+htmlFtr+'</html>' : chatToText();
-  try{ const r=await(await fetch('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:name,content})})).json();
-    r.ok?okMsg():failMsg(); }catch(e){ failMsg(); }
+  await saveText(name,content);
 }
 function toast(msg,err){ document.querySelectorAll('.toast.transient').forEach(x=>x.remove());  // no stacking
   const t=el('div','toast transient'); if(err){t.style.borderColor='var(--danger-border)';t.style.background='var(--danger-bg)';}
