@@ -147,6 +147,23 @@
   .thought.live .th-h{color:var(--live)}
   .thought .th-b{white-space:pre-wrap;font-size:calc(var(--read-size)*.6);line-height:1.55;color:var(--dim);max-height:260px;overflow-y:auto;margin-top:7px}
   .thought.collapsed .th-b{display:none}
+  /* agente: un passo = una riga compatta (clic = vedi il risultato), conferme, processi attivi */
+  .steps{margin:0 0 12px;display:flex;flex-direction:column;gap:3px}
+  .step{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--dim);cursor:pointer;user-select:none}
+  .step .ic{width:14px;display:inline-flex;justify-content:center}
+  .step.run .ic::before{content:'';width:10px;height:10px;border-radius:50%;border:2px solid var(--accent);border-top-color:transparent;animation:gspin .7s linear infinite}
+  .step.done .ic::before{content:'✓';color:var(--live)} .step.error .ic::before{content:'⚠';color:var(--danger)} .step.denied .ic::before{content:'⊘';color:var(--amber)}
+  .step-sum{display:none;white-space:pre-wrap;font-size:12px;color:var(--dim2);margin:2px 0 6px 22px;max-height:180px;overflow:auto;font-family:ui-monospace,Menlo,monospace}
+  .stepw.open .step-sum{display:block}
+  .confirm{border:1px solid var(--amber-border);background:var(--amber-bg);border-radius:12px;padding:12px 14px;margin:0 0 14px}
+  .confirm .ct{font-size:13.5px;color:var(--text);margin-bottom:8px}.confirm .ct b{color:var(--amber)}
+  .confirm pre{margin:0 0 10px;max-height:240px;overflow:auto;font-size:12px;line-height:1.5;white-space:pre-wrap;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:9px 11px;font-family:ui-monospace,Menlo,monospace}
+  .confirm .cb{display:flex;gap:10px}
+  .confirm.answered{opacity:.6;padding:8px 14px}.confirm.answered .cb,.confirm.answered pre{display:none}.confirm.answered .ct{margin:0}
+  .procbar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}.procbar:empty{display:none}
+  .proc{display:inline-flex;align-items:center;gap:8px;font-size:11.5px;color:var(--live);border:1px solid var(--chip-live-border);background:var(--chip-live-bg);border-radius:99px;padding:4px 6px 4px 11px}
+  .proc .dot{width:6px;height:6px;border-radius:50%;background:var(--live-dot);animation:gpulse 1.6s infinite}
+  .proc button{font:inherit;color:var(--danger);background:transparent;border:1px solid var(--danger-border);border-radius:99px;padding:1px 9px;cursor:pointer}
   .stop{display:flex;align-items:center;gap:6px;color:var(--danger);border:1px solid var(--danger-border);background:var(--danger-bg);border-radius:8px;padding:5px 11px;cursor:pointer;font-family:inherit;font-size:10.5px}
   .stop .sq{width:9px;height:9px;border-radius:2px;background:var(--danger)}
 
@@ -302,10 +319,12 @@
 
 <div class="composer"><div class="inner">
   <div class="recline hidden" id="recline"><span class="rd"></span><span class="mono"><span data-i18n="rec · in ascolto">rec · listening</span> <span id="recTime">0:00</span></span></div>
+  <div class="procbar" id="procbar"></div>
   <div class="chiprow" id="chiprow"></div>
   <div class="cmd" id="cmd">
     <span class="prompt mono">❯</span>
     <textarea class="ta" id="ta" rows="1" placeholder="Type a message…" data-i18n-ph="Scrivi un messaggio…" aria-label="Message" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+    <button class="pill" id="btnAgent" aria-pressed="false" title="Let Gephid use tools: calculator, documents, working folder, code sandbox" data-i18n-title="Gephid usa strumenti: calcolatrice, documenti, cartella di lavoro, codice in sandbox"><span data-i18n="Agente">Agent</span></button>
     <button class="pill" id="btnThink" aria-pressed="false" title="Think before answering (slower)" data-i18n-title="Ragiona prima di rispondere (più lento)"><span data-i18n="Ragiona">Think</span></button>
     <button class="iconbtn" id="btnMic" style="display:none" title="Dictation" aria-label="Voice dictation"><svg width="17" height="17" viewBox="0 0 24 24"><rect x="9" y="2.5" width="6" height="11" rx="3" stroke-width="2"></rect><path d="M5 11a7 7 0 0 0 14 0M12 18v3" stroke-width="2" stroke-linecap="round"></path></svg></button>
     <button class="iconbtn" id="btnAttach" title="Attach" aria-label="Attach files"><svg width="17" height="17" viewBox="0 0 24 24"><path d="M16 8.5 9.2 15.3a2.5 2.5 0 0 0 3.5 3.5l7-7a4.5 4.5 0 0 0-6.4-6.4l-7.2 7.2a6.5 6.5 0 0 0 9.2 9.2L19 18" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path></svg></button>
@@ -344,6 +363,10 @@
       <div class="sect"><div class="slabel mono" data-i18n="OCR per documenti scansionati">OCR for scanned documents</div>
         <div class="seg" data-seg="ocr" style="margin-bottom:10px"><span class="o" data-v="apple">Fast</span><span class="o" data-v="local" data-i18n="Avanzato">Advanced</span><span class="o" data-v="omlx" data-i18n="Massima fedeltà">Max fidelity</span></div>
         <div class="ocrhint" data-i18n="Fast: motore di sistema Apple. Avanzato: modello locale dedicato. Massima fedeltà: instrada ogni pagina al motore migliore.">Fast: Apple system engine. Advanced: dedicated local model. Max fidelity: routes each page to the best engine.</div></div>
+      <div class="sect"><div class="slabel mono" data-i18n="Agente">Agent</div>
+        <div class="rh" data-i18n="Cartella che l'agente può leggere e in cui può scrivere (ogni scrittura chiede conferma). Nessuna = niente strumenti sui file.">Folder the agent can read and write in (every write asks first). None = no file tools.</div>
+        <div class="mrow" style="margin-top:10px"><span class="mn mono" id="wsPath" style="font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0"></span></div>
+        <div class="saverow"><button class="btn-accent" id="wsPick" data-i18n="Scegli cartella…">Choose folder…</button><span class="note" id="wsClear" style="cursor:pointer;text-decoration:underline" data-i18n="Nessuna">None</span></div></div>
       <div class="sect"><div class="slabel mono" data-i18n="Istruzioni al modello">Model instructions</div>
         <div class="rh" data-i18n="Regole che il modello segue in ogni risposta. Vuoto = nessuna.">Rules the model follows in every reply. Empty = none.</div>
         <textarea id="sysPrompt" rows="4" spellcheck="false" style="width:100%;box-sizing:border-box;font-size:14px;line-height:1.5;color:var(--text);border:1px solid var(--field-border);border-radius:8px;padding:10px 12px;background:var(--field-bg);font-family:-apple-system,sans-serif;outline:none;resize:vertical;margin:9px 0"></textarea>
@@ -601,6 +624,7 @@ function renderHistory(){
   history.forEach((h,i)=>{ if(!h||!h.content) return;
     if(h.role==='user'){ userTurn(h.content,i); }
     else{ const b=addTurn('gep'); b.parentElement.dataset.h=i; if(h.thought) b.appendChild(thoughtBox(h.thought,h.thoughtSecs,true));
+      if(h.steps&&h.steps.length){ const sx=el('div','steps'); renderSteps(sx,h.steps); b.appendChild(sx); }
       const src=stripMarkers(h.content); const m=el('div','msg'); renderMd(m,src); m.dataset.src=src; b.appendChild(m);
       const meta=el('div','meta mono'); meta.innerHTML=metaHTML(); b.appendChild(meta); }
   });
@@ -738,7 +762,8 @@ async function generate(opts){
   const t0=Date.now(); const base= opts.body?(body.dataset.src||body.textContent):''; let acc=base; let errObj=null, lastTot=curSteps, draft='', lastStep=0, statusHold=0, finalTps=0;
   const attach = chatAttachIds();
   const think = localStorage.getItem('gephid-think')==='on';
-  let thought='', thBox=null, thT0=0, thSecs=null, missing=null;
+  let thought='', thBox=null, thT0=0, thSecs=null, missing=null, stepsBox=null; const steps=[];
+  const useAgent = localStorage.getItem('gephid-agent')==='on';
   const reveal = (localStorage.getItem('gephid-reveal')!=='off');  // "formazione dal rumore"
   const eDnc=head.querySelector('.dnc'), eBlk=head.querySelector('.blk'), eSecs=head.querySelector('.secs'), eToks=foot.querySelector('.toks');
   let lastFilled=-1, lastPaint=0;
@@ -758,7 +783,7 @@ async function generate(opts){
   rafId=requestAnimationFrame(anim);
   aborter=new AbortController();
   try{
-    await streamNDJSON('/api/chat',{chat_id:chatId,messages:history.map(h=>({role:h.role,content:h.content})),steps:curSteps,max_tokens:curMaxTok,attach:attach,reveal:reveal,cont:!!opts.cont,think:think},
+    await streamNDJSON('/api/chat',{chat_id:chatId,messages:history.map(h=>({role:h.role,content:h.content})),steps:curSteps,max_tokens:curMaxTok,attach:attach,reveal:reveal,cont:!!opts.cont,think:think,agent:useAgent&&!opts.cont},
       function(o){
         if(o.thought!==undefined){
           if(!thBox){ thBox=thoughtBox('',null,false); thT0=Date.now(); sb.insertBefore(thBox,body); }
@@ -775,6 +800,12 @@ async function generate(opts){
           if(d.block!==undefined) eBlk.textContent=(d.block+1);
           liveTps();
         }
+        else if(o.agent){ const a=o.agent; if(!stepsBox){ stepsBox=el('div','steps'); sb.insertBefore(stepsBox,body); }
+          let st=steps.find(x=>x.id===a.id); if(!st){ st={id:a.id}; steps.push(st); } Object.assign(st,{label:a.label,status:a.status,summary:a.summary||''});
+          renderSteps(stepsBox,steps); scrollDown(); }
+        else if(o.confirm){ const c=confirmCard(o.confirm); sb.insertBefore(c,body); scrollDown(true);
+          const live=$('#a11yLive'); if(live) live.textContent=(LANG==='it'?'Gephid chiede conferma':'Gephid asks for confirmation'); }
+        else if(o.procs){ renderProcs(o.procs); }
         else if(o.error){ errObj=o.error; if(o.missing) missing=o.missing; }
         else if(o.done){ if(o.tps) finalTps=o.tps; }
         else if(o.status){ const st=window.trStatus?trStatus(o.status,LANG):o.status; eSecs.textContent=st; statusHold=Date.now()+1700; }
@@ -806,6 +837,8 @@ async function generate(opts){
   renderMd(body,acc||''); body.className='msg'; body.dataset.src=acc;  // sorgente markdown grezza per un eventuale Continue
   // su Continue aggiorna l'assistant esistente invece di aggiungerne uno nuovo
   const entry={role:'assistant',content:acc}; if(thought){ entry.thought=thought; entry.thoughtSecs=thSecs; }
+  if(steps.length) entry.steps=steps.map(x=>({label:x.label,status:x.status,summary:x.summary}));
+  sb.querySelectorAll('.confirm:not(.answered)').forEach(c=>c.classList.add('answered'));  // Stop durante una conferma
   if(opts.cont && history.length && history[history.length-1].role==='assistant') Object.assign(history[history.length-1],{content:acc});
   else history.push(entry);
   sb.parentElement.dataset.h=history.length-1;
@@ -942,6 +975,42 @@ $('#fileinput').onchange=async e=>{ const files=[...e.target.files]; e.target.va
 document.addEventListener('drop',async e=>{ e.preventDefault(); $('#cmd').style.borderColor=''; $('#cmd').style.background='';
   if(!e.dataTransfer||!e.dataTransfer.files.length)return; for(const f of [...e.dataTransfer.files]) await ingestFileObj(f); });
 $('#ta').addEventListener('input',updateSend);
+
+/* ---- Agente: passi, conferme, processi in background ---- */
+function renderSteps(box,steps){ box.innerHTML='';
+  steps.forEach(st=>{ const w=el('div','stepw'); const r=el('div','step mono '+(st.status||'run')); r.setAttribute('role','button'); r.setAttribute('tabindex','0');
+    const ic=el('span','ic'); const t=el('span'); t.textContent=st.label||''; r.appendChild(ic); r.appendChild(t);
+    const sm=el('div','step-sum'); sm.textContent=st.summary||''; r.onclick=()=>{ if(st.summary) w.classList.toggle('open'); };
+    w.appendChild(r); w.appendChild(sm); box.appendChild(w); }); }
+function confirmCard(c){
+  const card=el('div','confirm'); const t=el('div','ct');
+  t.innerHTML=(LANG==='it'?'Gephid vuole: ':'Gephid wants to: ')+'<b>'+esc(c.label)+'</b>';
+  const pre=el('pre'); pre.textContent=c.preview||'';
+  const cb=el('div','cb'); const yes=el('button','btn-accent'); yes.textContent=(LANG==='it'?'Consenti':'Allow'); yes.style.padding='7px 16px';
+  const no=el('button','stop'); no.textContent=(LANG==='it'?'Nega':'Deny');
+  const answer=async allow=>{ card.classList.add('answered'); t.innerHTML+=' · '+(allow?(LANG==='it'?'consentito':'allowed'):(LANG==='it'?'negato':'denied'));
+    try{ await fetch('/api/agent/confirm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:c.token,allow})}); }catch(e){} };
+  yes.onclick=()=>answer(true); no.onclick=()=>answer(false);
+  cb.appendChild(yes); cb.appendChild(no); card.appendChild(t); card.appendChild(pre); card.appendChild(cb);
+  setTimeout(()=>yes.focus(),50); return card; }
+let procTimer=null;
+function renderProcs(list){ const bar=$('#procbar'); bar.innerHTML='';
+  (list||[]).filter(p=>p.running).forEach(p=>{ const d=el('span','proc mono'); const dot=el('span','dot'); const t=el('span');
+    t.textContent=p.lang+(p.listen&&p.listen.length?' · '+p.listen.join(', '):'')+' · '+(LANG==='it'?'in esecuzione':'running');
+    const b=el('button'); b.textContent='Stop'; b.onclick=async()=>{ try{ const r=await(await fetch('/api/agent/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:p.id})})).json(); renderProcs(r.procs); }catch(e){} };
+    d.appendChild(dot); d.appendChild(t); d.appendChild(b); bar.appendChild(d); });
+  clearInterval(procTimer); if(bar.children.length) procTimer=setInterval(async()=>{ try{ renderProcs((await(await fetch('/api/agent/procs')).json()).procs); }catch(e){} },5000); }
+function applyAgent(){ const on=localStorage.getItem('gephid-agent')==='on'; const b=$('#btnAgent'); b.classList.toggle('on',on); b.setAttribute('aria-pressed',on?'true':'false'); }
+$('#btnAgent').onclick=()=>{ localStorage.setItem('gephid-agent',localStorage.getItem('gephid-agent')==='on'?'off':'on'); applyAgent(); $('#ta').focus(); };
+applyAgent();
+function showWs(p){ const e=$('#wsPath'); if(e) e.textContent=p?p.replace(/^\/Users\/[^/]+/,'~'):(LANG==='it'?'nessuna cartella':'no folder'); }
+$('#wsPick').onclick=async()=>{ let p='';
+  if(!window.gephidOpenDir){ toast(LANG==='it'?'La scelta della cartella è disponibile nell\'app Gephid.':'Folder picking is available in the Gephid app.',true); return; }
+  try{ p=await gephidOpenDir(); }catch(e){} $('#wsPick').focus();  // il pannello nativo ruba il focus
+  if(!p) return;
+  try{ const r=await(await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workspace:p})})).json();
+    if(r.ok===false){ toast(r.error,true); return; } showWs(p); }catch(e){} };
+$('#wsClear').onclick=async()=>{ await postConfig({workspace:''}); showWs(''); };
 
 /* ---- "Ragiona" (enable_thinking): default OFF, Gephid è per le robe veloci ---- */
 function applyThink(){ const on=localStorage.getItem('gephid-think')==='on'; const b=$('#btnThink'); b.classList.toggle('on',on); b.setAttribute('aria-pressed',on?'true':'false'); }
@@ -1225,6 +1294,7 @@ async function compactChat(){
 let sysDefault='';
 async function loadConfig(){ try{ const c=await(await fetch('/api/config')).json(); curSteps=c.default_steps||48; curMaxTok=c.default_max_tokens||32768; curOcr=c.ocr_engine||'local'; setSeg('ocr',curOcr);
   if(typeof showRev==='function') showRev(c.model_rev);
+  showWs(c.workspace||'');
   sysDefault=c.system_prompt_default||''; if($('#sysPrompt'))$('#sysPrompt').value=(c.system_prompt!==undefined?c.system_prompt:sysDefault); }catch(e){} }
 $('#saveSys').onclick=()=>{ postConfig({system_prompt:$('#sysPrompt').value}); toast(LANG==='it'?'Istruzioni salvate':'Instructions saved'); };
 $('#resetSys').onclick=()=>{ $('#sysPrompt').value=sysDefault; postConfig({system_prompt:sysDefault}); toast(LANG==='it'?'Ripristinato al predefinito':'Reset to default'); };
@@ -1278,6 +1348,7 @@ window.gephidMenu=function(a){
   if(a==='bigger'||a==='smaller'){ const cur=TS_ORDER.indexOf(localStorage.getItem('gephid-textsize')||'l');
     const n=TS_ORDER[Math.max(0,Math.min(TS_ORDER.length-1,cur+(a==='bigger'?1:-1)))]; applyTextSize(n); setSeg('textsize',n); return; }
   if(a==='think') return $('#btnThink').click();
+  if(a==='agent') return $('#btnAgent').click();
 };
 document.addEventListener('keydown',e=>{ if(!e.metaKey||e.altKey||e.ctrlKey) return;
   const k=e.key.toLowerCase(), map={s:'save',n:'new',o:'attach',e:'export',',':'settings','=':'bigger','+':'bigger','-':'smaller'};

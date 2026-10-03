@@ -83,6 +83,8 @@ class ChannelSplitter:
                     self.buf = self.buf[i + len(end):]
                     self.mode = "text"
                     continue
+            if self.mode == "tool_call":
+                return out  # una chiamata esce intera, solo quando è chiusa (va interpretata, non mostrata)
             # nessun marcatore completo: emetti tutto tranne la coda ambigua
             h = _held_prefix(self.buf)
             emit, self.buf = (self.buf[:-h], self.buf[-h:]) if h else (self.buf, "")

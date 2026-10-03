@@ -56,3 +56,11 @@ def test_tool_call_separata():
 def test_flush_di_canale_non_chiuso():
     # stop a metà pensiero: quello che c'è resta pensiero, mai testo
     assert run(["<|channel>thought\nmeta"]) == [("thought", "meta")]
+
+
+def test_tool_call_un_carattere_alla_volta_esce_intera():
+    sp = ChannelSplitter(); out = []
+    for ch in 'Ok.<|tool_call>call:calcola{espressione:<|"|>2+2<|"|>}<tool_call|>':
+        out += sp.feed(ch)
+    calls = [t for k, t in out if k == "tool_call"]
+    assert calls == ['call:calcola{espressione:<|"|>2+2<|"|>}']
