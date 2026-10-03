@@ -21,10 +21,10 @@ cd Gephid
 ```
 
 ### Cosa fa `build.sh` (6 passi)
-1. **Front-end**: scarica e vendorizza marked, DOMPurify, html2pdf, KaTeX + mhchem (chimica) e i font in `src/backend/static/` (niente CDN a runtime). Le versioni sono pinnate in cima a `build.sh`; lo stamp `static/.versions` registra cosa è stato vendorizzato, così alzare un pin riscarica davvero invece di tenersi in silenzio il file vecchio.
+1. **Front-end**: scarica e vendorizza marked, DOMPurify, highlight.js, KaTeX + mhchem (chimica) e i font in `src/backend/static/` (niente CDN a runtime). Le versioni sono pinnate in cima a `build.sh`; lo stamp `static/.versions` registra cosa è stato vendorizzato, così alzare un pin riscarica davvero invece di tenersi in silenzio il file vecchio.
 2. **Python embeddato**: scarica l'interprete relocabile di [python-build-standalone](https://github.com/astral-sh/python-build-standalone) in `Gephid.app/Contents/Resources/python` e installa le dipendenze pinnate (`PYDEPS` in `build.sh`). Lo stamp `Resources/python/.gephid-deps` registra interprete e pin: se cambia `PYDEPS` reinstalla i pacchetti, se cambiano `PYVER`/`PYTAG` rifà l'interprete, altrimenti salta del tutto.
 3. **Launcher Go**: `CGO_ENABLED=1 go build` del guscio Cocoa/WKWebView.
-4. **Bundle**: assembla `Contents/` (binario, `diffuchat.py`, `page.html`, `static/`, icona, `Info.plist`).
+4. **Bundle**: assembla `Contents/` (binario, i moduli del backend `src/backend/*.py`, `page.html`, `static/`, icona, `Info.plist` e un'etichetta `build-info` che compare nel log del backend).
 5. **Firma** ad-hoc (`codesign`).
 6. **Install** opzionale in `/Applications` (con `--install`).
 
@@ -35,11 +35,14 @@ Default `mlx-community/diffusiongemma-26B-A4B-it-8bit` (circa 28 GB). Si scarica
 cache di HuggingFace; il path è configurabile dalle Impostazioni dell'app.
 
 ### Sviluppo rapido (senza ribuildare tutto)
-- Solo `src/backend/diffuchat.py` o `src/backend/page.html`: copiali in `Gephid.app/Contents/Resources/`,
+- Solo il backend (`src/backend/*.py`) o `src/backend/page.html`: copiali in `Gephid.app/Contents/Resources/`,
   poi `codesign --force --deep --sign - Gephid.app` e riavvia. Il launcher Go non va ricompilato.
 - `src/launcher/main.go`: `cd src/launcher && CGO_ENABLED=1 go build -o /tmp/Gephid .`, copia il
   binario in `Gephid.app/Contents/MacOS/Gephid`, ri-firma.
 - Backend senza GUI: `~/.venv-mlxvlm/bin/python src/backend/diffuchat.py`, poi `curl localhost:8890/...`.
+  Log dell'app installata: `~/Library/Logs/Gephid/backend.log`.
+- Test (funzioni pure, sandbox, confinamento dei file; il modello non serve):
+  una volta `~/.venv-mlxvlm/bin/python -m pip install pytest`, poi `~/.venv-mlxvlm/bin/python -m pytest tests`.
 
 ## Windows: la `.exe`
 

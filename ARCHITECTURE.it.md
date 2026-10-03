@@ -17,12 +17,16 @@ Gephid/
 ├── assets/icon.icns          # icona (serratura royalblue inclinata 13.37°)
 ├── src/
 │   ├── backend/
-│   │   ├── diffuchat.py       # backend: server HTTP + modello
-│   │   ├── page.html         # UI (HTML/CSS/JS), servita da disco a ogni richiesta
-│   │   └── static/           # librerie vendorizzate: marked, DOMPurify, html2pdf, KaTeX (+ mhchem) + font
+│   │   ├── diffuchat.py      # backend: server HTTP + worker del modello + ciclo agente
+│   │   ├── channels.py       # separa lo stream del modello: risposta / pensiero / chiamate a strumenti
+│   │   ├── agent.py          # strumenti dell'agente: calcolatrice, ricerca documenti, file, sandbox codice
+│   │   ├── store.py          # chat salvate SU RICHIESTA (di default non si salva nulla)
+│   │   ├── page.html         # UI (HTML/CSS/JS), riletta da disco quando cambia
+│   │   └── static/           # librerie vendorizzate: marked, DOMPurify, highlight.js, KaTeX (+ mhchem) + font
 │   └── launcher/
 │       ├── main.go           # guscio Go + WKWebView + cgo (menu, file/save panel, dettatura)
 │       └── go.mod go.sum logo.svg
+├── tests/                    # pytest: funzioni pure, sandbox, confinamento dei percorsi (senza modello)
 └── Gephid.app                # artefatto buildato (~1GB, non versionato: si ricrea con build.sh)
 ```
 
@@ -36,7 +40,7 @@ Gephid/
    Carica il modello via `mlx-vlm` e serve UI + API. La UI vive in `page.html`, riletta da disco a
    ogni richiesta.
 3. **Bundle .app**: Python embeddato (`Contents/Resources/python`, da python-build-standalone) +
-   `diffuchat.py` + `page.html` + `static/` + `icon.icns`. Firmato ad-hoc.
+   `src/backend/*.py` + `page.html` + `static/` + `icon.icns` + `build-info`. Firmato ad-hoc.
 
 ## Vincoli da non reintrodurre
 - **Thread del modello**: MLX vuole le ops del modello sul thread che ha caricato i pesi. Quindi
@@ -57,7 +61,24 @@ Gephid/
 - **100% offline**: `HF_HUB_OFFLINE=1`/`TRANSFORMERS_OFFLINE=1`; librerie JS in `/static`; bind
   `127.0.0.1`; check header `Origin` + `Host` (anti-CSRF / anti DNS-rebinding). Rendering fail-safe:
   markdown solo se `marked` e `DOMPurify` sono presenti, altrimenti testo grezzo.
-- **WKWebView**: non scarica via blob → salvataggio lato server (`/api/save`, solo in `~/Downloads`).
+- **Canali dell'output del modello**: il template apre sempre un canale di pensiero (`<|channel>thought …
+  <channel|>`, vuoto col ragionamento spento) e avvolge le chiamate a strumenti in `<|tool_call> …
+  <tool_call|>`. Ogni generazione passa da `ChannelSplitter`: mai mostrare output che lo salta.
+- **Istruzioni e documenti nel turno `system`**: pre-prompt e documenti della chat formano un prefisso
+  stabile; il frontend rimanda a OGNI turno tutti gli id degli allegati della chat (un documento
+  allegato al turno 1 deve valere al turno 5). Gli allegati vivono solo in RAM (LRU); dopo un riavvio
+  del backend la UI chiede di riallegarli invece di rispondere senza. La prefix cache di mlx-vlm 0.7.4
+  non si attiva con DiffusionGemma (verificato): i documenti lunghi si rileggono a ogni turno.
+- **Niente si salva se non richiesto**: la chat corrente vive in `sessionStorage`; solo "Salva chat"
+  scrive in `~/Library/Application Support/Gephid/chats`.
+- **Sicurezza dell'agente**: l'output degli strumenti non è fidato. Gli strumenti file sono confinati
+  nella cartella di lavoro (`safe_path`, symlink risolti); scrittura ed esecuzione di codice chiedono
+  sempre il clic dell'utente (`/api/agent/confirm`, 300s senza risposta = negato). Il codice gira in
+  `sandbox-exec` (niente rete in uscita tranne localhost, scrittura solo nella sua cartella
+  temporanea, timeout 30s); un processo in background che ascolta oltre 127.0.0.1 viene fermato
+  (controllo con `lsof`), e tutti muoiono col backend.
+- **WKWebView**: non scarica via blob → salvataggio lato server (`/api/save`, in `~/Downloads` o nel
+  percorso scelto col pannello di salvataggio nativo, solo dentro la home).
   `<input type=file>` non apre il picker → `gephidOpenFiles` (NSOpenPanel via bind); i pannelli
   nativi rubano il focus, quindi va ripristinato con `inp.focus()` al ritorno. `alert()/confirm()`
   non funzionano.
@@ -79,17 +100,22 @@ Gephid/
 `path` dal pannello nativo, solo dentro la home) · `POST /api/config` (step/maxtok/ocr/pre-prompt,
 effetto immediato) · `POST /api/reload` (ricarica modello a caldo) · `POST /api/download`
 (scarica/aggiorna il modello; il totale mostrato è il delta) · `POST /api/download/pause` ·
-`POST /api/model/check` (revisione locale vs HuggingFace).
+`POST /api/model/check` (revisione locale vs HuggingFace) · `GET /api/chats` ·
+`POST /api/chats/save|get|delete` (chat salvate) · `POST /api/agent/confirm` (consenti/nega
+un'azione) · `GET /api/agent/procs` · `POST /api/agent/stop`. `/api/chat` accetta anche `think`
+(ragionamento) e `agent` (strumenti) e streamma eventi `thought`, `agent`, `confirm`, `procs`.
 
 Rete usata **solo** da `/api/download` e `/api/model/check`, entrambe su azione esplicita
-dell'utente: nessun controllo automatico all'avvio.
+dell'utente: nessun controllo automatico all'avvio. Nessuno strumento dell'agente tocca la rete.
 
 ## Funzioni
 Streaming + stop · memoria per-sessione (finestra + riassunto cumulativo) · compattazione in 1
 prompt · export MD/TXT/HTML/PDF · markdown + LaTeX/chimica (KaTeX) · temi · allegati: immagini
 (vision), documenti txt/md/codice/PDF/Word/Excel/CSV (estrazione + map-reduce per i grandi), PDF
 scansionate via OCR (3 motori: GLM-OCR in-process di default, Apple Vision, router oMLX; vision
-come ultimo fallback) · dettatura on-device opt-in.
+come ultimo fallback) · dettatura on-device opt-in · Ragiona (pensiero visibile) · Agente (strumenti
+locali) · chat salvate solo su richiesta · rigenera/modifica · codice evidenziato · menu nativi con
+scorciatoie.
 
 ## Build
 `./build.sh` assembla `Gephid.app`; `./build.sh --install` la installa anche in /Applications.

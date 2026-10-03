@@ -24,23 +24,33 @@ computer.
 
 ## Funzioni
 - **Chat in streaming** con markdown reso mentre scrive, la diffusione visibile mentre ogni blocco
-  si forma, e un pulsante **Stop**.
-- **Memoria** della conversazione: una finestra scorrevole più un riassunto automatico, così le
-  chat lunghe non saturano mai il contesto.
-- **Allegati**:
-  - Immagini: il modello le vede (vision).
-  - Documenti: txt, md, codice, PDF, Word, Excel, CSV. Il testo viene estratto e conteggiato in
-    token; i documenti troppo grandi per la GPU vengono letti a pezzi e riassunti (map-reduce).
+  si forma, e un pulsante **Stop**. **Rigenera** qualunque risposta, **modifica** i tuoi messaggi.
+- **Ragiona** (spento di default): il modello ragiona prima di rispondere; vedi il ragionamento
+  scorrere, poi si compatta in una riga "Ha ragionato · 8s" che puoi riaprire con un clic.
+- **Agente** (spento di default): Gephid usa strumenti locali, nessuno dei quali tocca la rete:
+  calcolatrice esatta, ricerca nei documenti della chat e, in una **cartella di lavoro scelta da te**,
+  elenca/leggi/cerca file e li **scrive** (sempre con anteprima e scheda Consenti/Nega). Può anche
+  eseguire un breve programma **Python o Node** in una sandbox di macOS (niente rete in uscita,
+  scrittura solo in una cartella temporanea, limite di 30s), sempre dopo il tuo consenso; i server
+  lasciati attivi possono ascoltare solo su 127.0.0.1.
+- **Allegati che restano nella conversazione**: alleghi un documento una volta e ci fai tutte le
+  domande che vuoi.
+  - Immagini: il modello le vede (vision). Si incollano anche con ⌘V.
+  - Documenti: txt, md, codice, PDF, Word, Excel, CSV, eml. I documenti troppo grandi per la GPU
+    vengono letti a pezzi e riassunti (map-reduce).
   - PDF scansionati (anche misti testo+scansione): letti con OCR on-device — GLM-OCR locale di
     default, Apple Vision o router oMLX selezionabili dalle Impostazioni. Senza rete.
-- **Markdown più formule LaTeX e di chimica** (KaTeX).
-- **Export** di un'intera chat o di un singolo messaggio in MD, TXT, HTML o PDF (salvati in
-  `~/Downloads`). PDF e HTML hanno un'intestazione (modello usato, data di export) e un footer su
-  ogni pagina.
+- **Non si salva nulla se non lo chiedi.** La chat corrente sopravvive a una ricarica ma sparisce
+  quando chiudi l'app. **Salva chat** (⌘S) la tiene, con i suoi documenti, in
+  `~/Library/Application Support/Gephid`; **Chat salvate** la riapre o la elimina.
+- **Markdown più formule LaTeX e di chimica** (KaTeX); **codice evidenziato** con pulsante copia.
+- **Export** di un'intera chat o di un singolo messaggio in MD, TXT, HTML o PDF, col pannello di
+  salvataggio nativo.
 - **Compattazione in un prompt**: comprime tutta la conversazione in un unico prompt da incollare
   altrove.
-- **Dettatura on-device** (offline), attivabile dalle Impostazioni.
-- **Dimensione del testo regolabile**, temi chiaro/scuro/sistema, e cambio del **modello a caldo**
+- **App Mac nativa**: barra dei menu completa con scorciatoie (⌘N ⌘O ⌘S ⌘E ⌘, ⌘+/⌘−), finestra che
+  ricorda la sua dimensione, dettatura on-device (offline, opzionale), temi chiaro/scuro/sistema,
+  dimensione del testo regolabile, interfaccia italiano/inglese e cambio del **modello a caldo**
   senza riavviare.
 
 ## Come funziona
@@ -54,10 +64,12 @@ spegne quando si chiude l'ultima finestra. Dettagli tecnici: **[ARCHITECTURE.it.
 Apri **Gephid** (da `/Applications`, o con doppio click sulla `.app`). La finestra appare subito con
 una schermata di caricamento mentre il modello entra in memoria (qualche secondo; di più al
 primissimo avvio se deve ancora scaricare i pesi). Poi scrivi, allega file con la graffetta, oppure
-esporta e compatta dal menu di ogni messaggio.
+esporta e compatta dal menu Esporta. Accendi **Ragiona** o **Agente** dalle pillole accanto al
+campo del messaggio quando ti servono.
 
 Impostazioni (in alto a destra): tema, dimensione del testo, dettatura, step di denoising (qualità o
-velocità), max token di risposta, motore OCR, e quale **modello** usare tra quelli già sul tuo Mac.
+velocità), max token di risposta, motore OCR, la **cartella di lavoro** dell'agente, le istruzioni al
+modello e quale **modello** usare tra quelli già sul tuo Mac.
 
 ## Build da sorgente
 La `.app` non è versionata (pesa circa 1 GB col Python embeddato); si ricrea dai sorgenti:
