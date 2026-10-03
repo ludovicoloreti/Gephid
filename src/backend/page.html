@@ -1013,9 +1013,12 @@ function renderProcs(list){ const bar=$('#procbar'); bar.innerHTML='';
     d.appendChild(dot); d.appendChild(t); d.appendChild(b); bar.appendChild(d); });
   clearInterval(procTimer); if(bar.children.length) procTimer=setInterval(async()=>{ try{ renderProcs((await(await fetch('/api/agent/procs')).json()).procs); }catch(e){} },5000); }
 function applyAgent(){ const on=localStorage.getItem('gephid-agent')==='on'; const b=$('#btnAgent'); b.classList.toggle('on',on); b.setAttribute('aria-pressed',on?'true':'false'); }
-$('#btnAgent').onclick=()=>{ localStorage.setItem('gephid-agent',localStorage.getItem('gephid-agent')==='on'?'off':'on'); applyAgent(); $('#ta').focus(); };
+let curWorkspace='';
+$('#btnAgent').onclick=()=>{ localStorage.setItem('gephid-agent',localStorage.getItem('gephid-agent')==='on'?'off':'on'); applyAgent(); $('#ta').focus();
+  // senza cartella di lavoro l'agente non vede i file: dillo subito, non dopo un "non posso" del modello
+  if(localStorage.getItem('gephid-agent')==='on'&&!curWorkspace) toast(LANG==='it'?'Agente attivo. Per fargli leggere e scrivere file scegli una cartella in Impostazioni → Agente.':'Agent on. To let it read and write files, choose a folder in Settings → Agent.'); };
 applyAgent();
-function showWs(p){ const e=$('#wsPath'); if(e) e.textContent=p?p.replace(/^\/Users\/[^/]+/,'~'):(LANG==='it'?'nessuna cartella':'no folder'); }
+function showWs(p){ curWorkspace=p||''; const e=$('#wsPath'); if(e) e.textContent=p?p.replace(/^\/Users\/[^/]+/,'~'):(LANG==='it'?'nessuna cartella':'no folder'); }
 $('#wsPick').onclick=async()=>{ let p='';
   if(!window.gephidOpenDir){ toast(LANG==='it'?'La scelta della cartella è disponibile nell\'app Gephid.':'Folder picking is available in the Gephid app.',true); return; }
   try{ p=await gephidOpenDir(); }catch(e){} $('#wsPick').focus();  // il pannello nativo ruba il focus

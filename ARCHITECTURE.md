@@ -81,10 +81,12 @@ Gephid/
 - **Nothing is saved unless asked**: the current chat lives in `sessionStorage`; only "Save chat"
   writes to `~/Library/Application Support/Gephid/chats`.
 - **Agent safety**: tool output is untrusted. File tools are confined to the working folder
-  (`safe_path`, symlinks resolved); writing and running code always need the user's click
+  (`safe_path`, symlinks resolved; a full path pointing inside it is accepted); the agent can only
+  create NEW files, never modify, overwrite or delete; writing and running code always need the user's click
   (`/api/agent/confirm`, 300s without an answer = deny). Code runs under `sandbox-exec`: no outbound
   connections at all, not even to localhost (otherwise it could drive Gephid's own API), no DNS,
-  LaunchServices or Apple Events, writes only in its temp folder, secrets unreadable, 30s timeout. A
+  LaunchServices or Apple Events, no exec of anything but the interpreter (no `rm`, shell, `osascript`),
+  no signals to other processes, writes only in its temp folder, secrets unreadable, 30s timeout. A
   server it starts stays reachable from outside, but a process group listening beyond 127.0.0.1 is
   killed (`lsof` check); leftovers are cleaned up when the backend starts and when Gephid quits.
 - **WKWebView**: it cannot download via blob → server-side save (`/api/save`, `~/Downloads` or the

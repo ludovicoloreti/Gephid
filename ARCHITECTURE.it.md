@@ -81,10 +81,13 @@ Gephid/
 - **Niente si salva se non richiesto**: la chat corrente vive in `sessionStorage`; solo "Salva chat"
   scrive in `~/Library/Application Support/Gephid/chats`.
 - **Sicurezza dell'agente**: l'output degli strumenti non è fidato. Gli strumenti file sono confinati
-  nella cartella di lavoro (`safe_path`, symlink risolti); scrittura ed esecuzione di codice chiedono
+  nella cartella di lavoro (`safe_path`, symlink risolti; un percorso completo che punta dentro è
+  accettato); l'agente crea solo file NUOVI, mai modifiche, sovrascritture o cancellazioni; scrittura
+  ed esecuzione di codice chiedono
   sempre il clic dell'utente (`/api/agent/confirm`, 300s senza risposta = negato). Il codice gira in
   `sandbox-exec`: nessuna connessione in uscita, nemmeno verso localhost (altrimenti potrebbe pilotare
-  le API di Gephid stessa), niente DNS, LaunchServices o Apple Events, scrittura solo nella sua
+  le API di Gephid stessa), niente DNS, LaunchServices o Apple Events, nessun programma eseguibile
+  oltre all'interprete (niente `rm`, shell, `osascript`), nessun segnale ad altri processi, scrittura solo nella sua
   cartella temporanea, segreti non leggibili, timeout 30s. Un server avviato resta raggiungibile da
   fuori, ma un gruppo di processi che ascolta oltre 127.0.0.1 viene fermato (controllo con `lsof`);
   gli avanzi si ripuliscono all'avvio del backend e alla chiusura di Gephid.

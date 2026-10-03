@@ -45,7 +45,10 @@ def test_search_docs_trova_il_passaggio_giusto():
 def test_safe_path(tmp_path):
     root = tmp_path / "lavoro"; (root / "sub").mkdir(parents=True)
     assert A.safe_path(str(root), "sub/a.md") == str((root / "sub" / "a.md").resolve())
-    for bad in ["../x", "/etc/passwd", "sub/../../x", ""]:
+    # percorso completo (o con ~) che punta DENTRO la cartella: accettato come relativo
+    assert A.safe_path(str(root), str(root)) == str(root.resolve())
+    assert A.safe_path(str(root), str(root / "sub" / "a.md")) == str((root / "sub" / "a.md").resolve())
+    for bad in ["../x", "/etc/passwd", "sub/../../x", "", str(root) + "-altro/x", "~/.ssh/id_rsa"]:
         with pytest.raises(ValueError):
             A.safe_path(str(root), bad) if bad else A.safe_path(str(root), "..")
     os.symlink("/tmp", root / "esce")
@@ -133,3 +136,30 @@ def test_timeout_uccide_anche_i_figli():
     import subprocess, time; time.sleep(0.5)
     # pattern stretto: il processo eseguito è <tmp>/gephid-run-XXXX/main.py
     assert not subprocess.run(["pgrep", "-f", r"gephid-run-[A-Za-z0-9_]+/main\.py"], capture_output=True, text=True).stdout
+
+
+def test_scrittura_solo_file_nuovi(tmp_path):
+    (tmp_path / "esiste.md").write_text("originale")
+    ws = A.Workspace(str(tmp_path), extract=lambda n, d: d.decode())
+    with pytest.raises(ValueError):
+        ws.write_preview("esiste.md", "x")
+    with pytest.raises(ValueError):
+        ws.write_file("esiste.md", "x")
+    assert (tmp_path / "esiste.md").read_text() == "originale"
+
+
+def test_sandbox_niente_rm_shell_segnali(tmp_path):
+    vittima = os.path.expanduser("~/Desktop/gephid-test-vittima")
+    os.makedirs(vittima, exist_ok=True)
+    open(os.path.join(vittima, "importante.txt"), "w").write("x")
+    try:
+        for code in [f"import subprocess\nsubprocess.run(['/bin/rm','-rf',{vittima!r}],check=True)",
+                     "import subprocess\nsubprocess.run(['/bin/sh','-c','echo ciao'],check=True)",
+                     f"import shutil\nshutil.rmtree({vittima!r})",
+                     "import os, signal\nos.kill(os.getppid(), signal.SIGCONT)"]:
+            r = A.run_code("python", code, timeout=20)
+            assert r["exit"] != 0, (code, r)
+        assert os.path.exists(os.path.join(vittima, "importante.txt"))
+        assert "45" in A.run_code("python", "print(sum(range(10)))", timeout=20)["output"]
+    finally:
+        import shutil; shutil.rmtree(vittima, ignore_errors=True)

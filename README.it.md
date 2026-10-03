@@ -31,10 +31,12 @@ computer.
   scorrere, poi si compatta in una riga "Ha ragionato · 8s" che puoi riaprire con un clic.
 - **Agente** (spento di default): Gephid usa strumenti locali, nessuno dei quali tocca la rete:
   calcolatrice esatta, ricerca nei documenti della chat e, in una **cartella di lavoro scelta da te**,
-  elenca/leggi/cerca file e li **scrive** (sempre con anteprima e scheda Consenti/Nega). Può anche
-  eseguire un breve programma **Python o Node** in una sandbox di macOS (niente rete in uscita,
-  scrittura solo in una cartella temporanea, limite di 30s), sempre dopo il tuo consenso; i server
-  lasciati attivi possono ascoltare solo su 127.0.0.1.
+  elenca/leggi/cerca file e ne crea di **nuovi** (sempre con anteprima e scheda Consenti/Nega; non può
+  mai modificare, sovrascrivere o cancellare i tuoi file). Può anche eseguire un breve programma
+  **Python o Node** in una sandbox di macOS (niente rete, nessun altro programma — niente `rm`, niente
+  shell —, scrittura solo in una cartella temporanea, limite di 30s), sempre dopo il tuo consenso; i
+  server lasciati attivi possono ascoltare solo su 127.0.0.1. Senza cartella di lavoro ti spiega come
+  sceglierla.
 - **Allegati che restano nella conversazione**: alleghi un documento una volta e ci fai tutte le
   domande che vuoi.
   - Immagini: il modello le vede (vision). Si incollano anche con ⌘V.

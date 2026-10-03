@@ -190,10 +190,18 @@ def safe_path(root, rel):
     if not root:
         raise ValueError("Nessuna cartella di lavoro autorizzata: sceglila in Impostazioni → Agente.")
     rootr = os.path.realpath(root)
-    rel = str(rel or "").strip()
-    if not rel or os.path.isabs(rel):
+    rel = os.path.expanduser(str(rel or "").strip())
+    if os.path.isabs(rel):
+        # il modello spesso ripete il percorso completo che gli abbiamo indicato: se punta DENTRO la
+        # cartella di lavoro lo si accetta come relativo, altrimenti resta vietato
+        ar = os.path.realpath(rel)
+        if ar == rootr: rel = "."
+        elif ar.startswith(rootr + os.sep): rel = os.path.relpath(ar, rootr)
+        else: raise ValueError("Percorso fuori dalla cartella di lavoro: non consentito.")
+    if not rel:
         raise ValueError("Usa un percorso relativo alla cartella di lavoro.")
     p = os.path.realpath(os.path.join(rootr, rel))
+    if rel == ".": return rootr
     if p != rootr and not p.startswith(rootr + os.sep):
         raise ValueError("Percorso fuori dalla cartella di lavoro: non consentito.")
     return p
@@ -213,7 +221,7 @@ class Workspace:
         return os.path.relpath(p, os.path.realpath(self.root))
 
     def list_files(self, folder="."):
-        base = safe_path(self.root, folder) if folder not in (".", "", "/") else os.path.realpath(self.root)
+        base = safe_path(self.root, folder) if folder not in (".", "", "/", "./") else os.path.realpath(self.root)
         if not os.path.isdir(base):
             raise ValueError("Cartella inesistente.")
         out = []
@@ -263,24 +271,28 @@ class Workspace:
                     continue
         return "\n".join(hits) or "Nessun risultato."
 
-    def write_preview(self, path, content):
+    def _new_target(self, path):
+        """L'agente crea SOLO file nuovi: mai modificare, sovrascrivere o cancellare quelli dell'utente."""
         p = safe_path(self.root, path)
-        exists = os.path.exists(p)
-        head = f"{self._rel(p)} · {len(content.encode())} B" + (" · SOVRASCRIVE il file esistente" if exists else " · nuovo file")
+        if os.path.lexists(p):
+            raise ValueError(f"{self._rel(p)} esiste già: posso solo creare file nuovi, scegli un altro nome.")
+        return p
+
+    def write_preview(self, path, content):
+        p = self._new_target(path)
+        head = f"{self._rel(p)} · {len(content.encode())} B · nuovo file"
         shown = content[:20000]
         rest = len(content) - len(shown)
         return head + "\n\n" + shown + (f"\n[... altri {rest} caratteri non mostrati]" if rest else "")
 
     def write_file(self, path, content):
-        p = safe_path(self.root, path)
+        p = self._new_target(path)
         os.makedirs(os.path.dirname(p), exist_ok=True)
         if p.lower().endswith(".docx"):
             _write_docx(p, content)
         else:
-            tmp = p + ".gephid-tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
+            with open(p, "x", encoding="utf-8") as f:  # "x": fallisce se nel frattempo il file è comparso
                 f.write(content)
-            os.replace(tmp, p)
         return f"File scritto: {self._rel(p)} ({os.path.getsize(p)} B)."
 
 
@@ -323,7 +335,7 @@ _NO_READ = ["~/.ssh", "~/.aws", "~/.gnupg", "~/.config/diffuchat", "~/Library/Ke
             "~/Library/Application Support/Gephid", "~/Library/Mail", "~/Library/Messages"]
 
 
-def _profile(workdir):
+def _profile(workdir, exec_root):
     """Profilo sandbox-exec. Verificato dal vivo (2026-10-04):
     - NESSUNA connessione in uscita, nemmeno verso localhost: la regola "localhost:*" lasciava raggiungere
       il backend di Gephid (127.0.0.1:8890, da cui si può scrivere ovunque nella home) e una deny sulla
@@ -331,12 +343,18 @@ def _profile(workdir):
       (le connessioni in ingresso non sono "outbound").
     - DNS (dnssd), LaunchServices (`open`) e Apple Events negati: niente uscite laterali.
     - scrittura solo nella cartella del lavoro; niente lettura dei segreti in _NO_READ.
+    - si può eseguire SOLO l'interprete (la sua installazione, exec_root): niente rm, sh, osascript,
+      curl... nemmeno tramite subprocess/os.system; e niente segnali ad altri processi.
     NB: il bind su 0.0.0.0 NON è bloccabile da qui: lo intercetta il controllo con lsof."""
     q = lambda p: os.path.realpath(os.path.expanduser(p)).replace('"', "")
     no_read = " ".join(f'(subpath "{q(p)}")' for p in _NO_READ)
     return f"""(version 1)
 (allow default)
 (deny network-outbound)
+(deny process-exec)
+(allow process-exec (subpath "{q(exec_root)}"))
+(deny signal)
+(allow signal (target self))
 (deny mach-lookup (global-name "com.apple.dnssd.service") (global-name "com.apple.coreservices.launchservicesd") (global-name-prefix "com.apple.lsd"))
 (deny appleevent-send)
 (deny file-write*)
@@ -367,18 +385,20 @@ def run_code(lang, code, timeout=RUN_TIMEOUT, background=False):
     if lang in ("python", "py", "python3"):
         import sys
         src = os.path.join(work, "main.py"); cmd = [sys.executable, "-u", src]
+        exec_root = os.path.realpath(sys.base_prefix)  # l'installazione di Python (anche se è un venv)
     elif lang in ("node", "javascript", "js"):
         node = _node_bin()
         if not node:
             return {"output": "Node.js non è installato su questo Mac: posso usare Python.", "exit": 127, "timeout": False}
         src = os.path.join(work, "main.js"); cmd = [node, src]
+        exec_root = os.path.dirname(os.path.dirname(os.path.realpath(node)))
     else:
         return {"output": f"Linguaggio non supportato: {lang} (solo python o node).", "exit": 2, "timeout": False}
     with open(src, "w", encoding="utf-8") as f:
         f.write(code)
     prof = os.path.join(work, ".sandbox.sb")
     with open(prof, "w") as f:
-        f.write(_profile(work))
+        f.write(_profile(work, exec_root))
     env = {"PATH": "/usr/bin:/bin", "HOME": work, "TMPDIR": work, "PYTHONDONTWRITEBYTECODE": "1", "LANG": "en_US.UTF-8"}
     full = ["/usr/bin/sandbox-exec", "-f", prof] + cmd
     # Gruppo di processi proprio (pgid = pid): Stop/timeout uccidono anche i figli, e lsof -g li vede.
@@ -476,7 +496,8 @@ TOOLS_BASE = [
     _fn("data_ora", "Restituisce data e ora attuali del computer."),
     _fn("cerca_nei_documenti", "Cerca nei documenti allegati alla chat i passaggi più pertinenti a una domanda (utile per documenti lunghi).",
         {"query": S}, ["query"]),
-    _fn("esegui_codice", "Esegue un breve programma Python o Node in una sandbox senza rete. L'utente deve approvare. "
+    _fn("esegui_codice", "Esegue un breve programma Python o Node in una sandbox senza rete, che non può lanciare altri "
+        "programmi né toccare i file dell'utente: solo calcoli e piccole prove. L'utente deve approvare. "
         "Usa in_background=true solo per processi che restano attivi (es. un server su 127.0.0.1).",
         {"linguaggio": {"type": "string", "enum": ["python", "node"]}, "codice": S, "in_background": {"type": "boolean"}},
         ["linguaggio", "codice"]),
@@ -485,7 +506,8 @@ TOOLS_FILES = [
     _fn("elenca_file", "Elenca file e sottocartelle nella cartella di lavoro dell'utente.", {"cartella": S}),
     _fn("leggi_file", "Legge un file della cartella di lavoro (testo, PDF, Word, Excel).", {"path": S}, ["path"]),
     _fn("cerca_nei_file", "Cerca un testo nei file di testo della cartella di lavoro.", {"testo": S, "cartella": S}, ["testo"]),
-    _fn("scrivi_file", "Crea o sovrascrive un file nella cartella di lavoro (md, txt, csv, json, docx...). L'utente deve approvare.",
+    _fn("scrivi_file", "Crea un NUOVO file nella cartella di lavoro (md, txt, csv, json, docx...). Non può modificare, "
+        "sovrascrivere né cancellare file esistenti. L'utente deve approvare.",
         {"path": S, "contenuto": S}, ["path", "contenuto"]),
 ]
 CONFIRM = {"scrivi_file", "esegui_codice"}
