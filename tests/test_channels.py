@@ -1,6 +1,6 @@
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src", "backend"))
-from channels import ChannelSplitter, strip_markers
+from channels import ChannelSplitter, strip_markers, clean_draft
 
 
 def run(chunks):
@@ -64,3 +64,11 @@ def test_tool_call_un_carattere_alla_volta_esce_intera():
         out += sp.feed(ch)
     calls = [t for k, t in out if k == "tool_call"]
     assert calls == ['call:calcola{espressione:<|"|>2+2<|"|>}']
+
+
+def test_clean_draft():
+    assert clean_draft("[Mask] thought [Mask] Ciao [Mask]") == " [Mask] Ciao [Mask]"
+    assert clean_draft("[Mask] [Mask] :esegui_codice [Mask] codice: [Mask] print") is None
+    assert clean_draft("Ecco [Mask] risposta") == "Ecco [Mask] risposta"
+    assert clean_draft("Recall: [Mask] ok") == "Recall: [Mask] ok"
+    assert clean_draft("[Mask] call:calcola{espr") is None

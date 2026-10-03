@@ -6,7 +6,10 @@ UI: page.html su /. Temi, impostazioni, markdown + KaTeX.
 """
 import http.server, json, threading, time, sys, os, hashlib, base64, subprocess, tempfile, uuid, io, re
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # moduli accanto (channels, store, agent)
-from channels import ChannelSplitter, strip_markers
+from channels import ChannelSplitter, strip_markers, clean_draft
+def _draft(d):
+    d = clean_draft(d or "")
+    return _strip_emoji(d) if d else None
 from store import ChatStore
 import agent
 CHATS = ChatStore()  # chat salvate SOLO su richiesta (di default Gephid non salva nulla)
@@ -327,7 +330,7 @@ def genera_stream(messages, steps, max_tokens, on_delta, images=None, on_event=N
                         _last_diff = key
                         on_event({
                             "step": step, "total_steps": tot, "block": blk, "block_done": bdone,
-                            "draft": (_strip_emoji(strip_markers(getattr(c, "draft_text", "") or ""))) if is_draft else None,
+                            "draft": _draft(getattr(c, "draft_text", "")) if is_draft else None,
                             "tps": round(float(getattr(c, "generation_tps", 0.0) or 0.0), 1),
                         })
                 if not _route(splitter.feed(getattr(c, "text", "") or "")):

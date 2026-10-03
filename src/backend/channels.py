@@ -111,3 +111,22 @@ def strip_markers(text):
     for m in _ALL:
         out = out.replace(m, "")
     return out
+
+
+_DRAFT_THOUGHT = None
+
+
+def clean_draft(draft):
+    """Bozza di un blocco in formazione (testo + [Mask]): i marcatori possono essere ancora mascherati,
+    quindi il parser non li riconosce. Senza questa pulizia la UI mostrava "thought" (nome del canale)
+    e l'interno delle chiamate a strumenti (":esegui_codice … print"). None = non mostrare la bozza."""
+    import re
+    global _DRAFT_THOUGHT
+    if _DRAFT_THOUGHT is None:
+        _DRAFT_THOUGHT = re.compile(r"^(\s*\[Mask\])*\s*(<\|channel>)?\s*thought\b")
+    d = draft or ""
+    if "tool_call" in d or re.search(r"(?<![A-Za-z])call:\w|:\w+_\w+\b", d):  # non "recall:"
+        return None  # chiamata a strumento in formazione: è un dettaglio interno, mai testo da mostrare
+    d = _DRAFT_THOUGHT.sub("", d)
+    d = strip_markers(d) if "<" in d else d
+    return d
