@@ -10,6 +10,7 @@
 <script src="/static/katex.min.js"></script>
 <script src="/static/mhchem.min.js"></script><!-- chimica (\ce{}, \pu{}): va DOPO katex, registra le macro su di esso -->
 <script src="/static/auto-render.min.js"></script>
+<script src="/static/highlight.min.js"></script><!-- evidenziazione codice; colori dai token del tema qui sotto -->
 <style>
   :root,[data-theme="dark"]{
     --read-size:24px;  /* default L; SOLO testo di lettura (msg/stream/composer); regolabile in Impostazioni */
@@ -71,7 +72,10 @@
   /* chat */
   .scroll{flex:1;overflow-y:auto}
   /* il contenuto resta in basso quando è poco, ma SCROLLA quando è tanto (niente justify-content:flex-end che rompe lo scroll) */
-  .log{max-width:2200px;width:100%;margin:0 auto;padding:34px 48px 8px;display:flex;flex-direction:column;gap:28px;min-height:100%}
+  /* colonna di lettura: ~75 caratteri per riga alla dimensione scelta (prima su schermi larghi le righe
+     arrivavano a ~1600px, faticose da seguire). Il composer usa la stessa larghezza, così resta allineato. */
+  :root{--col:calc(var(--read-size) * 44 + 150px)}
+  .log{max-width:var(--col);width:100%;margin:0 auto;padding:34px 48px 8px;display:flex;flex-direction:column;gap:28px;min-height:100%}
   .log>:first-child{margin-top:auto}
   .turn{display:flex;gap:18px}
   .gutter{width:72px;flex:none;text-align:right;font-size:14px;padding-top:3px}
@@ -94,8 +98,23 @@
   .msg li{margin:4px 0}.msg li>p{margin:0}
   .msg blockquote{margin:9px 0;padding-left:14px;border-left:2px solid var(--border);color:var(--text-soft)}
   .msg pre{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:11px 13px;overflow-x:auto;margin:11px 0}
-  .msg code{font-family:'Courier New',Courier,monospace;font-size:.9em;background:var(--panel);padding:1px 5px;border-radius:4px}
-  .msg pre code{background:none;padding:0}
+  /* codice: font monospace di sistema (il Courier del resto della UI è "brand", qui conta leggere) */
+  .msg code{font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:.82em;background:var(--panel);padding:1px 5px;border-radius:4px}
+  .msg pre code{background:none;padding:0;font-size:.74em;line-height:1.55;display:block}
+  .msg pre{position:relative}
+  .codebar{display:flex;align-items:center;justify-content:space-between;margin:-4px -2px 8px;font-size:11.5px;color:var(--dim2)}
+  .codebar button{font:inherit;color:var(--dim);background:transparent;border:1px solid var(--border);border-radius:6px;padding:2px 8px;cursor:pointer}
+  .codebar button:hover{color:var(--text);border-color:var(--turn-stream)}
+  .hljs-keyword,.hljs-selector-tag,.hljs-built_in,.hljs-type{color:var(--accent-text)}
+  .hljs-string,.hljs-attr,.hljs-template-string,.hljs-regexp{color:var(--live)}
+  .hljs-number,.hljs-literal,.hljs-symbol{color:var(--amber)}
+  .hljs-comment,.hljs-quote{color:var(--dim2);font-style:italic}
+  .hljs-title,.hljs-function .hljs-title,.hljs-title.function_,.hljs-section{color:var(--text);font-weight:600}
+  .hljs-meta,.hljs-tag,.hljs-name{color:var(--dim)}
+  .hljs-variable,.hljs-params{color:var(--text-soft)}
+  /* azioni del messaggio utente: compaiono al passaggio del mouse */
+  .turn.user .meta{opacity:0;transition:opacity .15s;margin-top:6px}
+  .turn.user:hover .meta,.turn.user .meta:focus-within{opacity:1}
   .msg table{border-collapse:collapse;margin:11px 0;font-size:.95em}
   .msg th,.msg td{border:1px solid var(--border);padding:6px 11px;text-align:left}
   .msg a{color:var(--accent-text)}
@@ -134,7 +153,7 @@
   /* composer */
   .composer{flex:none;border-top:1px solid var(--header-border);padding:14px 0 18px}
   [data-theme="light"] .composer{background:var(--panel)}
-  .composer .inner{max-width:2200px;width:100%;margin:0 auto;padding:0 48px}
+  .composer .inner{max-width:var(--col);width:100%;margin:0 auto;padding:0 48px}
   .chiprow{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap}
   .chiprow:empty{display:none}
   .achip{display:inline-flex;align-items:center;gap:8px;font-size:11px;color:var(--text);background:var(--panel);border:1px solid var(--border-soft);border-radius:8px;padding:6px 10px}
@@ -143,6 +162,7 @@
   .achip .spin{width:14px;height:14px;border-radius:50%;border:2px solid var(--accent);border-top-color:transparent;animation:gspin .7s linear infinite}
   .achip.err{color:var(--danger);border-color:var(--danger-border);background:var(--danger-bg)}
   .achip.warn{color:var(--amber);border-color:var(--amber-border);background:var(--amber-bg)}
+  .achip img{width:22px;height:22px;object-fit:cover;border-radius:4px}
   .achip .sep2{color:var(--dim2)} .achip .tk{color:var(--accent-text)} .achip .x{color:var(--dim2);cursor:pointer}
   .cmd{display:flex;align-items:center;gap:12px;background:var(--cmd-bg);border:1px solid var(--cmd-border);border-radius:14px;padding:12px 12px 12px 16px}
   .cmd.dim{opacity:.5}
@@ -401,7 +421,7 @@ window.__I18N__ = {
   "Reading the attachment first…":"Sto leggendo l'allegato…","One turn at a time. I'll answer as soon as it's read.":"Un turno alla volta, ti rispondo appena ho finito di leggere.",
   "rec · listening":"rec · in ascolto","speak now · tap the red mic to stop":"parla ora · tocca il microfono rosso per fermare",
   "Context too large for the GPU. Lower Max tokens in Settings and try again.":"Contesto troppo grande per la GPU. Riduci i 'Max token risposta' nelle Impostazioni e riprova.",
-  "Open Settings":"Apri Impostazioni","Retry":"Riprova","Regenerate":"Rigenera","Continue":"Continua",
+  "Open Settings":"Apri Impostazioni","Retry":"Riprova","Regenerate":"Rigenera","Edit":"Modifica","Continue":"Continua",
   "Copy text":"Copia testo","Markdown":"Markdown","Text":"Testo","HTML":"HTML","PDF":"PDF",
   "Saved to":"Salvato in","opening Finder…":"apro Finder…","Copied":"Copiato","Copied to clipboard":"Copiato negli appunti",
   "Appearance":"Aspetto","System":"Sistema","Light":"Chiaro","Dark":"Scuro","Voice dictation":"Dettatura vocale",
@@ -437,7 +457,8 @@ window.trStatus = function(it, lang){
 <script>
 /* ============ i18n ============ */
 const I18N = window.__I18N__ || {};
-let LANG = localStorage.getItem('gephid-lang') || 'en';
+// lingua: quella scelta, altrimenti quella di macOS (prima era sempre inglese, anche su un Mac in italiano)
+let LANG = localStorage.getItem('gephid-lang') || (/^it\b/i.test(navigator.language||'') ? 'it' : 'en');
 function tr(en){ return (LANG==='it') ? (I18N[en]||en) : en; }
 function applyLang(lang){
   LANG=lang; localStorage.setItem('gephid-lang',lang); document.documentElement.lang=lang;
@@ -565,7 +586,7 @@ function renderWelcome(){
 // sessionStorage: sopravvive a ricarica/riavvio del backend, sparisce alla chiusura dell'app.
 // Con la chat si tengono i metadati degli allegati (gli id: il testo sta nella RAM del backend).
 function saveChat(){ try{ sessionStorage.setItem('gephid-chat', JSON.stringify({chatId, history,
-  attachments: attachments.filter(a=>a.id).map(a=>({id:a.id,name:a.name,kind:a.kind,tokens:a.tokens,sent:!!a.sent}))})); }catch(e){} }
+  attachments: attachments.filter(a=>a.id).map(a=>({id:a.id,name:a.name,kind:a.kind,tokens:a.tokens,sent:!!a.sent,thumb:(a.thumb&&a.thumb.length<200000)?a.thumb:null}))})); }catch(e){} }
 function restoreChat(){
   try{ localStorage.removeItem('gephid-chat'); }catch(e){}  // vecchia persistenza permanente: non più usata
   let saved; try{ saved=JSON.parse(sessionStorage.getItem('gephid-chat')||'null'); }catch(e){ saved=null; }
@@ -575,12 +596,13 @@ function restoreChat(){
   savedSig=sessionStorage.getItem('gephid-saved'); renderHistory(); return true;
 }
 function renderHistory(){
+  if(!history.length){ renderWelcome(); return; }
   $('#log').innerHTML='';
-  history.forEach(h=>{ if(!h||!h.content) return;
-    if(h.role==='user'){ const b=addTurn('user'); const m=el('div','msg'); m.textContent=h.content; b.appendChild(m); }
-    else{ const b=addTurn('gep'); if(h.thought) b.appendChild(thoughtBox(h.thought,h.thoughtSecs,true));
+  history.forEach((h,i)=>{ if(!h||!h.content) return;
+    if(h.role==='user'){ userTurn(h.content,i); }
+    else{ const b=addTurn('gep'); b.parentElement.dataset.h=i; if(h.thought) b.appendChild(thoughtBox(h.thought,h.thoughtSecs,true));
       const src=stripMarkers(h.content); const m=el('div','msg'); renderMd(m,src); m.dataset.src=src; b.appendChild(m);
-      const meta=el('div','meta mono'); meta.innerHTML=META_COPY.replace('__COPY__',tr('Copy')).replace('__DL__',tr('Download')); b.appendChild(meta); }
+      const meta=el('div','meta mono'); meta.innerHTML=metaHTML(); b.appendChild(meta); }
   });
   scrollDown(true);
 }
@@ -615,7 +637,18 @@ function renderMd(node,text){
   if(window.marked&&window.DOMPurify){
     node.innerHTML=DOMPurify.sanitize(marked.parse(mathEscape(text)));
     if(window.renderMathInElement){ try{ renderMathInElement(node,{delimiters:[{left:'$$',right:'$$',display:true},{left:'\\[',right:'\\]',display:true},{left:'$',right:'$',display:false},{left:'\\(',right:'\\)',display:false}],throwOnError:false,ignoredTags:['script','noscript','style','textarea','pre','code']}); }catch(e){} }
+    decorateCode(node);
   } else { node.textContent=text; }
+}
+/* blocchi di codice: evidenziazione (solo a risposta finita: durante lo stream costerebbe a ogni paint),
+   etichetta della lingua e pulsante Copia del solo blocco */
+function decorateCode(node){
+  node.querySelectorAll('pre>code').forEach(c=>{ const pre=c.parentElement; if(pre.querySelector('.codebar')) return;
+    const lang=((c.className||'').match(/language-([\w+#-]+)/)||[])[1]||'';
+    if(window.hljs){ try{ hljs.highlightElement(c); }catch(e){} }
+    const bar=el('div','codebar mono'); const l=el('span'); l.textContent=lang; const b=el('button'); b.textContent=tr('Copy');
+    b.onclick=()=>copyText(c.textContent).then(ok=>{ if(ok){ b.textContent=tr('Copied'); setTimeout(()=>b.textContent=tr('Copy'),1400); } });
+    bar.appendChild(l); bar.appendChild(b); pre.insertBefore(bar,c); });
 }
 // markdown LIVE durante lo streaming: reso subito (come prima del redesign), senza KaTeX (le formule a fine)
 function renderMdLive(node,text){ if(window.marked&&window.DOMPurify){ node.innerHTML=DOMPurify.sanitize(marked.parse(mathEscape(text))); } else { node.textContent=text; } }
@@ -670,8 +703,9 @@ async function send(){
   stickBottom=true;  // l'invio riporta sempre in fondo
   // user turn (stesso testo mostrato e in cronologia: niente divergenza IT/EN)
   const phTxt=txt||tr('(see attachments)');
-  const ub=addTurn('user'); const um=el('div','msg'); um.textContent=phTxt; ub.appendChild(um);
-  if(atts.length){ atts.forEach(a=>{ const c=el('div','att mono'); c.innerHTML='<svg width="13" height="13" viewBox="0 0 24 24"><path d="M14 4v5h5" stroke-width="2" stroke-linejoin="round"></path><path d="M14 4H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9z" stroke-width="2" stroke-linejoin="round"></path></svg>'+esc(a.name)+' <span style="color:var(--dim2)">·</span> ✓ '+(a.tokens||0)+' tok'; ub.appendChild(c); }); }
+  const ub=userTurn(phTxt,history.length);
+  const umeta=ub.querySelector('.meta');
+  if(atts.length){ atts.forEach(a=>{ const c=el('div','att mono'); c.innerHTML='<svg width="13" height="13" viewBox="0 0 24 24"><path d="M14 4v5h5" stroke-width="2" stroke-linejoin="round"></path><path d="M14 4H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9z" stroke-width="2" stroke-linejoin="round"></path></svg>'+esc(a.name)+' <span style="color:var(--dim2)">·</span> ✓ '+(a.tokens||0)+' tok'; ub.appendChild(c); }); ub.appendChild(umeta); }
   history.push({role:'user',content:phTxt}); saveChat();  // salva subito: il messaggio non si perde anche se la generazione fallisce
   $('#ta').value=''; $('#ta').style.height='auto';
   atts.forEach(a=>a.sent=true); renderChips(); saveChat();
@@ -683,7 +717,12 @@ async function send(){
 // tutti gli allegati della chat vanno a OGNI turno: un documento allegato al turno 1 vale anche al 5
 function chatAttachIds(){ return attachments.filter(a=>a.id&&!a.err).map(a=>a.id); }
 
-const META_COPY='<span class="act" data-k="copy" role="button" tabindex="0"><svg width="13" height="13" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2" stroke-width="2"></rect><path d="M5 15V5a2 2 0 0 1 2-2h10" stroke-width="2" stroke-linecap="round"></path></svg>'+'__COPY__</span><span class="act" data-k="dl" role="button" tabindex="0"><svg width="13" height="13" viewBox="0 0 24 24"><path d="M12 4v11m0 0 4-4m-4 4-4-4M5 20h14" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path></svg>__DL__</span>';
+const META_COPY='<span class="act" data-k="copy" role="button" tabindex="0"><svg width="13" height="13" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2" stroke-width="2"></rect><path d="M5 15V5a2 2 0 0 1 2-2h10" stroke-width="2" stroke-linecap="round"></path></svg>'+'__COPY__</span><span class="act" data-k="dl" role="button" tabindex="0"><svg width="13" height="13" viewBox="0 0 24 24"><path d="M12 4v11m0 0 4-4m-4 4-4-4M5 20h14" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path></svg>__DL__</span><span class="act" data-k="regen" role="button" tabindex="0"><svg width="13" height="13" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-.6 3" stroke-width="2" stroke-linecap="round"></path><path d="M20 4v5h-5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path></svg>__REGEN__</span>';
+const META_EDIT='<span class="act" data-k="edit" role="button" tabindex="0"><svg width="13" height="13" viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16v4z" stroke-width="2" stroke-linejoin="round"></path></svg>__EDIT__</span>';
+function metaHTML(){ return META_COPY.replace('__COPY__',tr('Copy')).replace('__DL__',tr('Download')).replace('__REGEN__',tr('Regenerate')); }
+function userTurn(text,idx){ const b=addTurn('user'); const m=el('div','msg'); m.textContent=text; b.appendChild(m);
+  const meta=el('div','meta mono'); meta.innerHTML=META_EDIT.replace('__EDIT__',tr('Edit')); b.appendChild(meta);
+  if(idx!=null) b.parentElement.dataset.h=idx; return b; }
 async function generate(opts){
   opts=opts||{}; genStopped=false;
   const sb = opts.turn || addTurn('stream'); sb.classList.add('stream');
@@ -769,6 +808,7 @@ async function generate(opts){
   const entry={role:'assistant',content:acc}; if(thought){ entry.thought=thought; entry.thoughtSecs=thSecs; }
   if(opts.cont && history.length && history[history.length-1].role==='assistant') Object.assign(history[history.length-1],{content:acc});
   else history.push(entry);
+  sb.parentElement.dataset.h=history.length-1;
   saveChat();  // persiste la risposta completa
   if(genStopped){  // interrotto -> tieni il parziale + Regenerate/Continue
     const f=el('div','meta mono');
@@ -781,7 +821,7 @@ async function generate(opts){
   const done=el('div','meta mono');
   // tps autoritativo del backend (token/sec veri); fallback a stima token≈char/4 sul solo testo generato ora
   const tps=finalTps?Math.round(finalTps):Math.round(((acc.length-base.length)/4)/Math.max(1,(Date.now()-t0)/1000));
-  done.innerHTML=META_COPY.replace('__COPY__',tr('Copy')).replace('__DL__',tr('Download'))+'<span class="tps">'+tps+' tok/s · '+curSteps+' step</span>';
+  done.innerHTML=metaHTML()+'<span class="tps">'+tps+' tok/s · '+curSteps+' step</span>';
   sb.appendChild(done); scrollDown();
   const live=$('#a11yLive'); if(live) live.textContent=(LANG==='it'?'Risposta completata':'Response complete');  // VoiceOver: annuncia la fine
 }
@@ -851,6 +891,7 @@ function updateSend(){ const loading=attachments.some(a=>a.loading); const sb=$(
 function renderChips(){ const c=$('#chiprow'); c.innerHTML='';
   attachments.forEach(a=>{ const ch=el('div','achip mono'+(a.err?' err':'')+(a.sent&&!a.err?' sent':''));
     if(a.sent&&!a.err) ch.title=(LANG==='it'?'Allegato a questa chat: vale per tutte le domande':'Attached to this chat: used for every question');
+    if(a.thumb){ const im=el('img'); im.src=a.thumb; im.alt=''; ch.appendChild(im); }
     if(a.loading){ ch.appendChild(el('span','spin')); }
     else if(!a.err){ const ok=el('span','ok'); ok.textContent='✓'; ch.appendChild(ok); }
     const nm=el('span'); nm.textContent=a.name; ch.appendChild(nm);
@@ -865,7 +906,7 @@ function renderChips(){ const c=$('#chiprow'); c.innerHTML='';
     c.appendChild(ch); });
   updateSend();
 }
-async function ingestOne(body,name){ const a={id:null,name:name,tokens:0,loading:true,t0:Date.now(),ctrl:null,
+async function ingestOne(body,name,thumb){ const a={id:null,name:name,tokens:0,loading:true,t0:Date.now(),ctrl:null,thumb:thumb||null,
     token:(crypto.randomUUID?crypto.randomUUID():'t'+Date.now()+Math.round(Math.random()*1e9))};
   try{a.ctrl=new AbortController();}catch(e){}
   body.cancel_token=a.token;
@@ -885,7 +926,14 @@ $('#btnAttach').onclick=async()=>{
 };
 async function ingestFileObj(f){
   if(f.size>58*1024*1024){ attachments.push({id:null,name:f.name,err:(LANG==='it'?'troppo grande da trascinare (max ~58MB): usa la graffetta':'too large to drop (max ~58MB): use the paperclip')}); renderChips(); return; }
-  const b64=await new Promise(res=>{const r=new FileReader();r.onload=()=>res(String(r.result).split(',')[1]);r.readAsDataURL(f);}); ingestOne({filename:f.name,content:b64},f.name); }
+  const url=await new Promise(res=>{const r=new FileReader();r.onload=()=>res(String(r.result));r.readAsDataURL(f);});
+  const isImg=/^image\//.test(f.type) && f.size<6*1024*1024;  // anteprima nel chip (data: è ammesso dalla CSP)
+  ingestOne({filename:f.name,content:url.split(',')[1]},f.name,isImg?url:null); }
+/* incolla un'immagine (⌘V) direttamente nel campo: diventa un allegato */
+$('#ta').addEventListener('paste',e=>{ const items=[...((e.clipboardData&&e.clipboardData.items)||[])].filter(i=>i.kind==='file');
+  if(!items.length) return; e.preventDefault();
+  items.forEach((it,n)=>{ const f=it.getAsFile(); if(!f) return; const ext=(f.type.split('/')[1]||'png').replace('jpeg','jpg');
+    const named=new File([f],(f.name&&f.name!=='image.png'?f.name:('incollata-'+Date.now()+(n||'')+'.'+ext)),{type:f.type}); ingestFileObj(named); }); });
 $('#fileinput').onchange=async e=>{ const files=[...e.target.files]; e.target.value=''; for(const f of files) await ingestFileObj(f); };
 /* drag & drop allegati (evidenzia la command bar, ingest al drop).
    preventDefault SEMPRE: un drop non gestito (testo/URL) farebbe navigare la WKWebView via dalla UI. */
@@ -938,6 +986,12 @@ $('#log').addEventListener('click',e=>{ const act=e.target.closest('.act'); if(!
   const turn=act.closest('.turn'); const body=turn&&turn.querySelector('.msg');
   // sorgente markdown grezza (dataset.src) quando c'è: il textContent del DOM reso duplica le formule KaTeX
   const txt=body?(body.dataset.src||body.textContent):'';
+  const idx=turn&&turn.dataset.h!==undefined?+turn.dataset.h:-1;
+  if(act.dataset.k==='regen'||act.dataset.k==='edit'){
+    if(busy||idx<0||!history[idx]) return;
+    const old=history[idx].content; history=history.slice(0,idx); saveChat(); renderHistory();
+    if(act.dataset.k==='edit'){ const ta=$('#ta'); ta.value=old; ta.style.height='auto'; ta.style.height=Math.min(150,ta.scrollHeight)+'px'; ta.focus(); updateSend(); return; }
+    stickBottom=true; busy=true; (async()=>{ try{ await generate({}); } finally{ if(busy) setBusy(false); } })(); return; }
   if(act.dataset.k==='copy'){ copyText(txt).then(ok=>{ if(ok)toast(tr('Copied')); }); }
   else if(act.dataset.k==='dl'){ saveText('gephid-'+Date.now()+'.md',txt); }
 });
