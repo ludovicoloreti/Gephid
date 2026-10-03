@@ -296,11 +296,12 @@ def genera_stream(messages, steps, max_tokens, on_delta, images=None, on_event=N
         except Exception:
             pass
     splitter = ChannelSplitter()
-    parts = []
+    parts, thoughts = [], []
     def _route(pieces):
         """Smista i pezzi del splitter: testo -> risposta, pensiero -> on_thought. False = fermati."""
         for kind, s in pieces:
             if kind == "thought":
+                thoughts.append(s)
                 if on_thought is not None and on_thought(s) is False: return False
                 continue
             if kind == "tool_call":  # mai mostrata: la interpreta il ciclo agente (False = fermati qui)
@@ -313,29 +314,37 @@ def genera_stream(messages, steps, max_tokens, on_delta, images=None, on_event=N
             if on_delta(s) is False: return False  # client sparito -> stop, non sprecare GPU
             if _degenerate("".join(parts[-3:])): return False  # loop di ripetizione (step bassi) -> stop
         return True
+    last = [None]
+    last_diff = [None]  # dedup: evita il flood di eventi 'diff' identici (stesso step/blocco)
+    def _chunk(c):
+        last[0] = c
+        if on_event is not None:
+            step = int(getattr(c, "diffusion_step", 0) or 0)
+            blk = int(getattr(c, "diffusion_canvas_index", 0) or 0)
+            bdone = bool(getattr(c, "diffusion_block_complete", False))
+            is_draft = bool(getattr(c, "is_draft", False))
+            # il modello a diffusione spesso NON popola diffusion_total_steps sui chunk: uso 'steps' come totale
+            tot = int(getattr(c, "diffusion_total_steps", 0) or 0) or int(steps)
+            key = (step, blk, bdone)
+            if key != last_diff[0]:  # un evento per avanzamento reale (nuovo blocco / step / fine blocco)
+                last_diff[0] = key
+                on_event({
+                    "step": step, "total_steps": tot, "block": blk, "block_done": bdone,
+                    "draft": _draft(getattr(c, "draft_text", "")) if is_draft else None,
+                    "tps": round(float(getattr(c, "generation_tps", 0.0) or 0.0), 1),
+                })
+        return _route(splitter.feed(getattr(c, "text", "") or ""))
     with GEN_LOCK:
         t0 = time.time()
-        _last_diff = None  # dedup: evita il flood di eventi 'diff' identici (stesso step/blocco)
+        stopped = [False]
+        def _chunk_stop(c):
+            if _chunk(c) is False:
+                stopped[0] = True
+                return False
+            return True
         try:
-            for c in stream_generate(MODELO, PROC, prompt=formatted, **kw):
-                if on_event is not None:
-                    step = int(getattr(c, "diffusion_step", 0) or 0)
-                    blk = int(getattr(c, "diffusion_canvas_index", 0) or 0)
-                    bdone = bool(getattr(c, "diffusion_block_complete", False))
-                    is_draft = bool(getattr(c, "is_draft", False))
-                    # il modello a diffusione spesso NON popola diffusion_total_steps sui chunk: uso 'steps' come totale
-                    tot = int(getattr(c, "diffusion_total_steps", 0) or 0) or int(steps)
-                    key = (step, blk, bdone)
-                    if key != _last_diff:  # un evento per avanzamento reale (nuovo blocco / step / fine blocco)
-                        _last_diff = key
-                        on_event({
-                            "step": step, "total_steps": tot, "block": blk, "block_done": bdone,
-                            "draft": _draft(getattr(c, "draft_text", "")) if is_draft else None,
-                            "tps": round(float(getattr(c, "generation_tps", 0.0) or 0.0), 1),
-                        })
-                if not _route(splitter.feed(getattr(c, "text", "") or "")):
-                    break
-            else:
+            _run_generation(formatted, kw, _chunk_stop)
+            if not stopped[0]:
                 _route(splitter.flush())
         except Exception as e:  # rete di sicurezza: OOM GPU -> messaggio chiaro invece del traceback metal
             s = str(e)
@@ -344,9 +353,49 @@ def genera_stream(messages, steps, max_tokens, on_delta, images=None, on_event=N
             raise
         dt = time.time() - t0
     text = "".join(parts).strip()
-    try: ntok = len(TOK.encode(text))
-    except Exception: ntok = len(text.split())
-    return text, round(ntok / dt, 1) if dt > 0 else 0, round(dt, 1)
+    return text, _tps(last[0], text, "".join(thoughts), dt), round(dt, 1)
+
+def _tps(last, text, thought, dt):
+    """Token al secondo ONESTI: tutti i token generati (pensiero compreso), senza il tempo di lettura
+    del prompt. Prima: solo i token della risposta diviso il tempo totale, quindi con "Ragiona" il
+    tempo del pensiero contava ma i suoi token no (7 tok/s mostrati mentre il modello ne faceva ~150).
+    Fonte primaria: generation_tps misurato dalla libreria; ripiego: stima su testo e tempo."""
+    g = float(getattr(last, "generation_tps", 0.0) or 0.0) if last is not None else 0.0
+    if g > 0: return round(g, 1)
+    try: ntok = len(TOK.encode(text)) + (len(TOK.encode(thought)) if thought else 0)
+    except Exception: ntok = len((text + " " + thought).split())
+    return round(ntok / dt, 1) if dt > 0 else 0
+
+def _run_generation(formatted, kw, on_chunk):
+    """Esegue la generazione chiamando on_chunk(chunk) per ogni risultato; on_chunk -> False = fermati.
+
+    Perché non basta stream_generate: per DiffusionGemma mlx-vlm (0.6.x e 0.7.x) passa dal generatore
+    interno del modello, che SENZA una callback on_result accumula tutti i risultati e li restituisce
+    solo a generazione finita (verificato: 961 chunk tutti a 11.05s su una risposta di 11s). Quindi in
+    Gephid lo "streaming" mostrava il testo solo alla fine e Stop non interrompeva nulla. Con on_result
+    il testo arriva a ogni blocco (primo testo a 2.7s invece di 10.2s) e restituire False ferma davvero
+    il modello (al confine del blocco successivo). Se le funzioni interne della libreria cambiano, si
+    ripiega su stream_generate."""
+    try:
+        from mlx_vlm.generate import dispatch as _D
+        from mlx_vlm.generate.diffusion import stream_diffusion_generate_from_kwargs as _sdg, is_diffusion_model as _isd
+        if not _isd(MODELO): raise LookupError("non è un modello a diffusione")
+        kw = dict(kw)
+        image = kw.pop("image", None)
+        skip = bool(kw.pop("skip_special_tokens", False))
+        ids, pv, mask, kw = _D._prepare_generation_inputs(MODELO, PROC, formatted, image, None, None, kw)
+    except Exception:
+        for c in stream_generate(MODELO, PROC, prompt=formatted, **kw):
+            if on_chunk(c) is False: break
+        return
+    stop = [False]
+    def cb(c):
+        if stop[0]: return False
+        if on_chunk(c) is False: stop[0] = True
+        return not stop[0]
+    sids = set(getattr(TOK, "all_special_ids", []) or []) if skip else []
+    for c in _sdg(MODELO, PROC, TOK, ids, pv, mask, sids, kw, skip_special_tokens=skip, on_result=cb):
+        if cb(c) is False: break  # eventuali risultati restituiti solo a fine generazione
 
 # ---------- Agente: ciclo strumenti (tool calling nativo del template) ----------
 AGENT_MAX_STEPS = 8
