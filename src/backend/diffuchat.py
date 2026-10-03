@@ -7,6 +7,8 @@ UI: page.html su /. Temi, impostazioni, markdown + KaTeX.
 import http.server, json, threading, time, sys, os, hashlib, base64, subprocess, tempfile, uuid, io, re
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # moduli accanto (channels, store, agent)
 from channels import ChannelSplitter, strip_markers
+from store import ChatStore
+CHATS = ChatStore()  # chat salvate SOLO su richiesta (di default Gephid non salva nulla)
 
 # 100% offline: niente chiamate di rete a HuggingFace (il modello è già in cache).
 # Senza questo, lanciata via .app (senza token HF nell'ambiente) si blocca su un controllo di rete.
@@ -1159,6 +1161,8 @@ class H(http.server.BaseHTTPRequestHandler):
                 _NEEDS_DL = not model_cached(MODEL)
             self._send(200, json.dumps({"model_ok": MODEL_OK, "model_err": MODEL_ERR[:300], "model": MODEL,
                                         "needs_download": bool(_NEEDS_DL) and not MODEL_OK}))
+        elif self.path == "/api/chats":
+            self._send(200, json.dumps({"chats": CHATS.list()}))
         elif self.path == "/api/models":
             self._send(200, json.dumps({"models": list_local_models(), "current": MODEL}))
         elif self.path.startswith("/static/"):
@@ -1467,6 +1471,40 @@ class H(http.server.BaseHTTPRequestHandler):
                 self._send(200, json.dumps(model_update_info(MODEL)))
             except Exception as e:
                 self._send(200, json.dumps({"supported": True, "error": str(e)[:200]}))
+        elif self.path == "/api/chats/save":
+            # salvataggio esplicito: cronologia + TESTO dei documenti (vivono in RAM: senza, riaprendo
+            # la chat dopo un riavvio il modello non li avrebbe più). Le immagini non si salvano.
+            try:
+                c = req.get("chat") or {}
+                docs, skipped = [], []
+                with INGEST_LOCK:
+                    for a in (c.get("attachments") or []):
+                        e = INGEST.get(str(a.get("id")))
+                        if e and e["kind"] == "doc":
+                            docs.append({"id": a["id"], "name": e["name"], "text": e["text"], "tokens": e.get("tokens", 0)})
+                        else:
+                            skipped.append(str(a.get("name") or "allegato"))
+                hist = [{k: m[k] for k in ("role", "content", "thought", "thoughtSecs") if k in m}
+                        for m in (c.get("history") or []) if isinstance(m, dict)]
+                at = CHATS.save({"id": str(c.get("id") or ""), "title": str(c.get("title") or "Chat")[:120],
+                                 "history": hist, "docs": docs})
+                self._send(200, json.dumps({"ok": True, "saved_at": at, "skipped": skipped}))
+            except Exception as e:
+                self._send(200, json.dumps({"ok": False, "error": str(e)[:200]}))
+        elif self.path == "/api/chats/get":
+            c = CHATS.load(str(req.get("id") or ""))
+            if not c:
+                self._send(200, json.dumps({"error": "Chat non trovata."})); return
+            for d in c.get("docs") or []:  # i documenti tornano in RAM con lo stesso id
+                _ingest_put(d["id"], {"kind": "doc", "name": d["name"], "text": d["text"], "tokens": d.get("tokens", 0)})
+            _evict_ingest()
+            atts = [{"id": d["id"], "name": d["name"], "kind": "doc", "tokens": d.get("tokens", 0), "sent": True}
+                    for d in c.get("docs") or []]
+            self._send(200, json.dumps({"id": c["id"], "title": c.get("title"), "history": c.get("history") or [],
+                                        "attachments": atts, "saved_at": c.get("saved_at")}))
+        elif self.path == "/api/chats/delete":
+            CHATS.delete(str(req.get("id") or ""))
+            self._send(200, json.dumps({"ok": True}))
         elif self.path == "/api/download/pause":
             _DL["cancel"] = True
             self._send(200, json.dumps({"ok": True}))
