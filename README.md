@@ -24,7 +24,9 @@ leaves your computer.
 
 ## Features
 - **Streaming chat** with markdown rendered as it types, a live view of the diffusion as each block
-  forms, and a **Stop** button. **Regenerate** any answer, **edit** any of your messages.
+  forms, and a **Stop** button that really interrupts the model. **Regenerate** the last answer,
+  **edit** any of your messages. The speed shown (tok/s) counts every generated token, reasoning
+  included.
 - **Think** (off by default): the model reasons before answering; you watch the reasoning stream,
   then it folds into a one-line "Thought · 8s" you can click to reopen.
 - **Agent** (off by default): Gephid can use local tools, none of which touches the network: an exact

@@ -61,6 +61,15 @@ Gephid/
 - **100% offline**: `HF_HUB_OFFLINE=1`/`TRANSFORMERS_OFFLINE=1`; JS libraries in `/static`; bind to
   `127.0.0.1`; `Origin` + `Host` header checks (anti-CSRF / anti DNS-rebinding). Fail-safe rendering:
   markdown only if `marked` and `DOMPurify` are present, otherwise raw text.
+- **Real streaming = `_run_generation`**: for DiffusionGemma, mlx-vlm runs the model's own diffusion
+  generator, which buffers every result until the end unless it gets an `on_result` callback (true
+  for 0.6.x and 0.7.x). Through plain `stream_generate` the text appeared only when generation
+  finished and Stop could not interrupt it. `_run_generation` passes `on_result`: text arrives block
+  by block and returning `False` stops the model at the next block. It relies on the private
+  `dispatch._prepare_generation_inputs` and falls back to `stream_generate` if that changes: re-check
+  after every mlx-vlm bump.
+- **tok/s** is the library's `generation_tps`: every generated token (reasoning included), prompt
+  reading excluded.
 - **Model output channels**: the template always opens a thought channel (`<|channel>thought …
   <channel|>`, empty when thinking is off) and wraps tool calls in `<|tool_call> … <tool_call|>`.
   Every generation goes through `ChannelSplitter`: never print model output that skipped it.
@@ -89,12 +98,13 @@ Gephid/
   the `_degenerate` guard stops pathological repetition. Frontend: typewriter (rAF) with markdown
   rendered live and the diffusion visible as the block forms.
 - **Runtime**: `mlx-vlm` only (`mlx-lm` gives `Model type diffusion_gemma not supported`); test venv
-  `~/.venv-mlxvlm`. Speed (M5 Max): 8 steps ≈ 44 tok/s, 16 ≈ 104 tok/s. Default model
+  `~/.venv-mlxvlm`. Speed (M5 Max, mlx-vlm 0.7.4, 40 steps): ~89 tok/s on a long answer,
+  first text after the first block (~2.4s), ~135 tok/s with Think. Default model
   `mlx-community/diffusiongemma-26B-A4B-it-8bit` (~28GB).
 
 ## API (on 127.0.0.1:8890)
 `GET /` UI · `GET /api/health` · `GET /api/models` · `GET /api/config` ·
-`GET /static/...` · `POST /api/chat` (NDJSON streaming, `attach`=image/doc ids) · `POST /api/compact`
+`GET /static/...` · `POST /api/chat` (NDJSON streaming, `attach`=ALL the chat's attachment ids) · `POST /api/compact`
 (streaming) · `POST /api/ingest` (file→image/doc, OCR for scanned pages — also in mixed PDFs;
 `cancel_token` to abort) · `POST /api/ingest/cancel` · `POST /api/save` (`~/Downloads` by default;
 `path` from the native panel, home-only) · `POST /api/config` (steps/maxtok/ocr/pre-prompt, immediate

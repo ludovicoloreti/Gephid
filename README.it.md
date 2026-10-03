@@ -24,7 +24,9 @@ computer.
 
 ## Funzioni
 - **Chat in streaming** con markdown reso mentre scrive, la diffusione visibile mentre ogni blocco
-  si forma, e un pulsante **Stop**. **Rigenera** qualunque risposta, **modifica** i tuoi messaggi.
+  si forma, e un pulsante **Stop** che interrompe davvero il modello. **Rigenera** l'ultima risposta,
+  **modifica** i tuoi messaggi. La velocità mostrata (tok/s) conta tutti i token generati, ragionamento
+  compreso.
 - **Ragiona** (spento di default): il modello ragiona prima di rispondere; vedi il ragionamento
   scorrere, poi si compatta in una riga "Ha ragionato · 8s" che puoi riaprire con un clic.
 - **Agente** (spento di default): Gephid usa strumenti locali, nessuno dei quali tocca la rete:
