@@ -5,6 +5,8 @@ Avvio (nel venv mlx-vlm):  ~/.venv-mlxvlm/bin/python src/backend/diffuchat.py
 UI: page.html su / (default), vecchia UI inline su /old. Temi, impostazioni, markdown + KaTeX.
 """
 import http.server, json, threading, time, sys, os, hashlib, base64, subprocess, tempfile, uuid, io, re
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # moduli accanto (channels, store, agent)
+from channels import ChannelSplitter, strip_markers
 
 # 100% offline: niente chiamate di rete a HuggingFace (il modello è già in cache).
 # Senza questo, lanciata via .app (senza token HF nell'ambiente) si blocca su un controllo di rete.
@@ -154,6 +156,7 @@ def stream_job(job, emit):
         if ev[0] == "delta": ok = emit({"delta": ev[1]})
         elif ev[0] == "status": ok = emit({"status": ev[1]})
         elif ev[0] == "diff": ok = emit({"diff": ev[1]})  # telemetria diffusione reale
+        elif ev[0] == "thought": ok = emit({"thought": ev[1]})  # ragionamento (canale separato dalla risposta)
         elif ev[0] == "done": ok = emit({"done": True, "tps": ev[1], "secs": ev[2]})
         elif ev[0] == "error": ok = emit({"error": ev[1]})
         if ok is False: job.cancel.set()  # client disconnesso -> ferma il worker
@@ -226,27 +229,22 @@ def inject_system(messages):
     return out
 
 def genera(messages, steps, max_tokens):
-    formatted = TOK.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-    with GEN_LOCK:
-        t0 = time.time()
-        parts = []
-        for c in stream_generate(MODELO, PROC, prompt=formatted,
-                                 max_tokens=int(max_tokens), max_denoising_steps=int(steps),
-                                 skip_special_tokens=True):
-            parts.append(_strip_emoji(getattr(c, "text", "") or ""))
-        dt = time.time() - t0
-    text = "".join(parts).strip()
-    try: ntok = len(TOK.encode(text))
-    except Exception: ntok = len(text.split())
-    return text, round(ntok / dt, 1) if dt > 0 else 0, round(dt, 1)
+    """Generazione non in streaming per i lavori interni (riassunti, map-reduce): solo il testo."""
+    text, tps, dt = genera_stream(messages, steps, max_tokens, lambda d: True)
+    return text, tps, dt
 
-def genera_stream(messages, steps, max_tokens, on_delta, images=None, on_event=None, reveal=False, cont=False):
-    """Come genera(), ma invoca on_delta(testo) per ogni blocco generato (streaming).
+def genera_stream(messages, steps, max_tokens, on_delta, images=None, on_event=None, reveal=False,
+                  cont=False, think=False, on_thought=None):
+    """Invoca on_delta(testo) per ogni pezzo di RISPOSTA generato (streaming).
     Se on_delta restituisce False (client disconnesso) la generazione si ferma.
     images: lista di path immagine -> il modello le "vede" (vision-language).
     on_event(dict): telemetria di diffusione REALE per ogni chunk (step di denoising,
     blocco, draft "testo che si risolve dal rumore", tok/s) — alimenta lo stream a diffusione
-    della UI con dati veri del modello invece di un timer."""
+    della UI con dati veri del modello invece di un timer.
+    think: abilita il ragionamento del template (enable_thinking); il pensiero esce da on_thought,
+    MAI nel testo della risposta. Con think spento il modello apre comunque un canale vuoto, che
+    ChannelSplitter fa sparire (prima finiva in chiaro in ogni risposta)."""
+    tmpl_kw = {"enable_thinking": bool(think)}
     if images:
         from mlx_vlm.prompt_utils import apply_chat_template as _vlm_tmpl
         # CONTINUAZIONE anche con immagini: il turno parziale dell'assistente va APPESO al prompt
@@ -258,13 +256,13 @@ def genera_stream(messages, steps, max_tokens, on_delta, images=None, on_event=N
         if cont and messages and messages[-1].get("role") == "assistant":
             partial = messages[-1].get("content", "") or ""
             tmpl_msgs = messages[:-1]
-        formatted = _vlm_tmpl(PROC, getattr(MODELO, "config", None), tmpl_msgs, num_images=len(images)) + partial
+        formatted = _vlm_tmpl(PROC, getattr(MODELO, "config", None), tmpl_msgs, num_images=len(images), **tmpl_kw) + partial
     elif cont and messages and messages[-1].get("role") == "assistant":
         # CONTINUAZIONE: il prompt finisce col parziale assistant (turno non chiuso) -> il modello prosegue da lì
         partial = messages[-1].get("content", "") or ""
-        formatted = TOK.apply_chat_template(messages[:-1], add_generation_prompt=True, tokenize=False) + partial
+        formatted = TOK.apply_chat_template(messages[:-1], add_generation_prompt=True, tokenize=False, **tmpl_kw) + partial
     else:
-        formatted = TOK.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+        formatted = TOK.apply_chat_template(messages, add_generation_prompt=True, tokenize=False, **tmpl_kw)
     kw = {"max_tokens": int(max_tokens), "max_denoising_steps": int(steps), "skip_special_tokens": True}
     if images: kw["image"] = images
     # "Formazione dal rumore": se reveal=True abilita gli unmasking-draft -> il modello emette
@@ -278,9 +276,23 @@ def genera_stream(messages, steps, max_tokens, on_delta, images=None, on_event=N
                 kw["diffusion_unmasking_interval"] = 2  # un draft ogni 2 step (fluido ma non troppo pesante)
         except Exception:
             pass
+    splitter = ChannelSplitter()
+    parts = []
+    def _route(pieces):
+        """Smista i pezzi del splitter: testo -> risposta, pensiero -> on_thought. False = fermati."""
+        for kind, s in pieces:
+            if kind == "thought":
+                if on_thought is not None and on_thought(s) is False: return False
+                continue
+            if kind != "text": continue  # tool_call: gestite dal ciclo agente, mai mostrate grezze
+            s = _strip_emoji(s)
+            if not s: continue
+            parts.append(s)
+            if on_delta(s) is False: return False  # client sparito -> stop, non sprecare GPU
+            if _degenerate("".join(parts[-3:])): return False  # loop di ripetizione (step bassi) -> stop
+        return True
     with GEN_LOCK:
         t0 = time.time()
-        parts = []
         _last_diff = None  # dedup: evita il flood di eventi 'diff' identici (stesso step/blocco)
         try:
             for c in stream_generate(MODELO, PROC, prompt=formatted, **kw):
@@ -296,16 +308,13 @@ def genera_stream(messages, steps, max_tokens, on_delta, images=None, on_event=N
                         _last_diff = key
                         on_event({
                             "step": step, "total_steps": tot, "block": blk, "block_done": bdone,
-                            "draft": (_strip_emoji(getattr(c, "draft_text", "") or "")) if is_draft else None,
+                            "draft": (_strip_emoji(strip_markers(getattr(c, "draft_text", "") or ""))) if is_draft else None,
                             "tps": round(float(getattr(c, "generation_tps", 0.0) or 0.0), 1),
                         })
-                delta = _strip_emoji(getattr(c, "text", "") or "")
-                if delta:
-                    parts.append(delta)
-                    if on_delta(delta) is False:  # client sparito -> stop, non sprecare GPU
-                        break
-                    if _degenerate("".join(parts[-3:])):  # loop di ripetizione (step bassi) -> stop
-                        break
+                if not _route(splitter.feed(getattr(c, "text", "") or "")):
+                    break
+            else:
+                _route(splitter.flush())
         except Exception as e:  # rete di sicurezza: OOM GPU -> messaggio chiaro invece del traceback metal
             s = str(e)
             if "malloc" in s or "buffer size" in s or "memory" in s.lower():
@@ -825,7 +834,8 @@ def _clean(messages):
         if isinstance(m, dict):
             r, c = m.get("role"), m.get("content")
             if r in ("user", "assistant") and isinstance(c, str):
-                out.append({"role": r, "content": c})
+                # cronologie salvate prima del fix possono contenere i marcatori del canale vuoto
+                out.append({"role": r, "content": strip_markers(c) if r == "assistant" else c})
     return out
 
 def _fp(msgs):
@@ -1987,6 +1997,7 @@ class H(http.server.BaseHTTPRequestHandler):
                 mtok = _coerce_int(req.get("max_tokens"), TOK_MIN, TOK_MAX, CFG["default_max_tokens"])
                 reveal = bool(req.get("reveal", False))  # "formazione dal rumore" (unmasking-draft)
                 cont = bool(req.get("cont", False))      # continuazione di un parziale interrotto
+                think = bool(req.get("think", False))    # "Ragiona": enable_thinking del template
                 attach = req.get("attach") or []
                 img_paths = []
                 for i in attach:
@@ -2022,7 +2033,11 @@ class H(http.server.BaseHTTPRequestHandler):
                         job.q.put(("delta", d)); return True
                     def on_event(ev):
                         if not job.cancel.is_set(): job.q.put(("diff", ev))
-                    text, tps, dt = genera_stream(msgs, steps, eff_mtok, on_delta, images=img_paths or None, on_event=on_event, reveal=reveal, cont=cont)
+                    def on_thought(t):
+                        if job.cancel.is_set(): return False
+                        job.q.put(("thought", t)); return True
+                    text, tps, dt = genera_stream(msgs, steps, eff_mtok, on_delta, images=img_paths or None, on_event=on_event,
+                                                  reveal=reveal, cont=cont, think=think, on_thought=on_thought)
                     job.q.put(("done", tps, dt))
                 stream_job(Job(work), emit)
             except Exception as e:
