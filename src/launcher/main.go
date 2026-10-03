@@ -96,6 +96,7 @@ static void installMenus(void) {
   addAct(viewMenu, (it ? @"Testo più piccolo" : @"Smaller Text"), @"smaller", @"-", cmd);
   [viewMenu addItem:[NSMenuItem separatorItem]];
   addAct(viewMenu, (it ? @"Ragiona prima di rispondere" : @"Think Before Answering"), @"think", @"r", cmdShift);
+  addAct(viewMenu, (it ? @"Agente (strumenti locali)" : @"Agent (Local Tools)"), @"agent", @"a", cmdShift);
   [viewItem setSubmenu:viewMenu];
   // Finestra
   NSMenuItem *winItem = [[NSMenuItem alloc] init]; [mainMenu addItem:winItem];
@@ -339,6 +340,9 @@ func killBackend(cmd *exec.Cmd) {
 	if cmd != nil && cmd.Process != nil {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
+	// i programmi lanciati dall'agente hanno un gruppo di processi proprio (per poterli fermare coi
+	// figli): il kill del gruppo del backend non li raggiunge. La loro cartella ha prefisso gephid-run-.
+	_ = exec.Command("pkill", "-9", "-f", "gephid-run-").Run()
 }
 
 // startBackend avvia il backend Python come sottoprocesso: gruppo proprio (killabile coi figli),
@@ -503,7 +507,6 @@ func main() {
 	w := webview.New(false)
 	defer w.Destroy()
 	C.installMenus() // menu nativo bilingue: App, File, Modifica, Vista, Finestra (con scorciatoie)
-	C.gephidSetupWindow(w.Window())
 	// NB: nessuna richiesta permessi all'avvio. Vengono chiesti solo al primo uso del microfono
 	// (gephidDictStart), e solo se l'utente ha abilitato la dettatura nelle Impostazioni.
 	w.Bind("gephidDictStart", func(locale string) int { // avvia dettatura on-device nella lingua della UI
@@ -536,6 +539,8 @@ func main() {
 	})
 	w.SetTitle("Gephid")
 	w.SetSize(980, 820, webview.HintNone)
+	// DOPO SetSize: SetSize fa setFrame+center e sovrascriverebbe il frame ripristinato dall'autosave
+	C.gephidSetupWindow(w.Window())
 	w.SetHtml(page(tx("Carico Gephid…", "Loading Gephid…"),
 		tx("Avvio il motore locale.", "Starting the local engine."), true))
 

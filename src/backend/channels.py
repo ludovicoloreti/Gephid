@@ -10,7 +10,8 @@ potrebbe essere l'inizio di un marcatore viene trattenuta finché non si sa cos'
 _OPEN = {"<|channel>": "thought", "<|tool_call>": "tool_call"}
 _CLOSE = {"thought": "<channel|>", "tool_call": "<tool_call|>"}
 # marcatori di struttura che non devono mai finire nel testo mostrato
-_DROP = ("<|turn>", "<turn|>", '<|"|>', "<eos>", "<bos>", "<pad>", "<end_of_turn>", "<start_of_turn>")
+_DROP = ("<|turn>", "<turn|>", '<|"|>', "<eos>", "<bos>", "<pad>", "<end_of_turn>", "<start_of_turn>",
+         "<|tool_response>", "<tool_response|>", "<|tool>", "<tool|>", "<|think|>")
 _ALL = tuple(_OPEN) + tuple(_CLOSE.values()) + _DROP
 
 

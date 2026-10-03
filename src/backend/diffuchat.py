@@ -167,7 +167,7 @@ def stream_job(job, emit):
         if ev[0] == "end": break
         ok = True
         if ev[0] == "delta": ok = emit({"delta": ev[1]})
-        elif ev[0] == "status": ok = emit({"status": ev[1]}) if ev[1] else True  # "" = solo keep-alive
+        elif ev[0] == "status": ok = emit({"status": ev[1]} if ev[1] else {})  # "" = keep-alive: scritto davvero, così un client sparito (Stop) viene rilevato
         elif ev[0] == "diff": ok = emit({"diff": ev[1]})  # telemetria diffusione reale
         elif ev[0] == "thought": ok = emit({"thought": ev[1]})  # ragionamento (canale separato dalla risposta)
         elif ev[0] in ("agent", "confirm", "procs"): ok = emit({ev[0]: ev[1]})  # passi dell'agente
@@ -348,7 +348,7 @@ def genera_stream(messages, steps, max_tokens, on_delta, images=None, on_event=N
 # ---------- Agente: ciclo strumenti (tool calling nativo del template) ----------
 AGENT_MAX_STEPS = 8
 TOOL_RESULT_MAX = 24000          # caratteri di risultato rimandati al modello per un passo
-CONFIRM_TIMEOUT = 300            # s senza risposta dell'utente = negato
+CONFIRM_TIMEOUT = 120            # s senza risposta dell'utente = negato (ben sotto JOB_EVENT_TIMEOUT dei job in coda)
 CONFIRMS = {}                    # token -> {"ev": Event, "allow": bool}
 AGENT_HINT = ("Hai a disposizione degli strumenti: usali quando servono davvero (conti esatti, leggere o "
               "scrivere file della cartella di lavoro, cercare nei documenti, eseguire un breve programma). "
@@ -369,8 +369,8 @@ def _ask_confirm(job, name, a, ws):
     """Scheda di conferma nella UI; blocca il worker finché l'utente risponde (o Stop / timeout = no)."""
     if name == "scrivi_file":
         preview = ws.write_preview(str(a.get("path", "")), str(a.get("contenuto", "")))
-    else:
-        preview = f"{a.get('linguaggio', 'python')}{' · in background' if a.get('in_background') else ''}\n\n{str(a.get('codice', ''))[:4000]}"
+    else:  # il codice si mostra TUTTO: un'anteprima troncata potrebbe nascondere la parte che viene eseguita
+        preview = f"{a.get('linguaggio', 'python')}{' · in background' if a.get('in_background') else ''}\n\n{str(a.get('codice', ''))}"
     tok = uuid.uuid4().hex
     CONFIRMS[tok] = {"ev": threading.Event(), "allow": False}
     job.q.put(("confirm", {"token": tok, "tool": name, "label": _tool_label(name, a), "preview": preview}))
@@ -399,6 +399,8 @@ def run_tool(job, name, a, ws, docs):
             if name == "cerca_nei_file": return ws.grep(str(a.get("testo", "")), str(a.get("cartella") or "."))
         if name in agent.CONFIRM:
             if name == "scrivi_file": agent.safe_path(ws.root, str(a.get("path", "")))  # path invalido: errore prima di chiedere
+            if name == "esegui_codice" and len(str(a.get("codice", ""))) > agent.MAX_CODE:
+                return f"Errore: codice troppo lungo per essere rivisto dall'utente (max {agent.MAX_CODE} caratteri)."
             if not _ask_confirm(job, name, a, ws):
                 return "L'utente ha negato l'azione."
             if name == "scrivi_file": return ws.write_file(str(a.get("path", "")), str(a.get("contenuto", "")))
@@ -497,6 +499,7 @@ UPLOAD_DIR = os.path.join(tempfile.gettempdir(), "gephid-uploads")
 INGEST = {}        # id -> {"kind":"image"/"doc","name","path"(img)/"text"(doc),"tokens"}
 INGEST_LOCK = threading.Lock()   # protegge INGEST/INGEST_CANCELS (handler HTTP concorrenti)
 INGEST_CANCELS = {}  # cancel_token -> threading.Event: la × sul chip annulla l'OCR anche lato server
+IMG_TOKENS = 320   # stima prudente dei token di un'immagine nel prompt (Gemma: ~256 soft token + marcatori)
 IMG_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".heic", ".tiff"}
 
 MAX_DECOMPRESSED = 300 * 1024 * 1024  # 300MB: difesa contro "zip bomb" in docx/xlsx
@@ -1364,7 +1367,7 @@ class H(http.server.BaseHTTPRequestHandler):
                 with INGEST_LOCK:
                     missing = [i for i in attach if i not in INGEST]
                     img_paths = [p for i in attach if i in INGEST and INGEST[i]["kind"] == "image"
-                                 for p in (INGEST[i].get("paths") or [])][-6:]  # tetto: le immagini costano token
+                                 for p in (INGEST[i].get("paths") or [])][-3:]  # tetto: le immagini costano token e GPU
                     doc_ids = [i for i in attach if i in INGEST and INGEST[i]["kind"] == "doc"]
                 if missing:  # backend riavviato (gli allegati vivono solo in RAM): dillo, mai rispondere senza
                     emit({"error": "Alcuni allegati di questa chat non sono più in memoria (Gephid si è riavviato). "
@@ -1383,15 +1386,16 @@ class H(http.server.BaseHTTPRequestHandler):
                     # Guard memoria GPU: attenzione ~seq^2, quindi prompt+output deve stare in SAFE_SEQ.
                     # Tieni il prompt entro un tetto (riducendo i documenti) e clampa i max token di output.
                     # Nota: usa una variabile nuova (eff_mtok), non riassegnare 'mtok' del closure (UnboundLocalError).
-                    eff_mtok = mtok
-                    if not img_paths:  # con immagini il conteggio token non è affidabile: salta il guard
-                        ptok = _ntok(msgs)
-                        cap = SAFE_SEQ - 256
-                        if ptok > cap:
-                            job.q.put(("status", "contesto troppo grande per la GPU: uso le porzioni principali..."))
-                            msgs = _fit_prompt(msgs, cap)
-                            ptok = _ntok(msgs)
-                        eff_mtok = max(TOK_MIN, min(mtok, SAFE_SEQ - ptok))  # prompt+output entro il buffer
+                    # Le immagini contano con una stima prudente (IMG_TOKENS): prima, con immagini, il guard
+                    # veniva saltato e una chat lunga con una foto rischiava l'OOM a ogni turno.
+                    img_tok = IMG_TOKENS * len(img_paths)
+                    ptok = _ntok(msgs) + img_tok
+                    cap = SAFE_SEQ - 256
+                    if ptok > cap:
+                        job.q.put(("status", "contesto troppo grande per la GPU: uso le porzioni principali..."))
+                        msgs = _fit_prompt(msgs, cap - img_tok)
+                        ptok = _ntok(msgs) + img_tok
+                    eff_mtok = max(TOK_MIN, min(mtok, SAFE_SEQ - ptok))  # prompt+output entro il buffer
                     def on_delta(d):
                         if job.cancel.is_set(): return False
                         job.q.put(("delta", d)); return True
@@ -1624,7 +1628,7 @@ class H(http.server.BaseHTTPRequestHandler):
                             docs.append({"id": a["id"], "name": e["name"], "text": e["text"], "tokens": e.get("tokens", 0)})
                         else:
                             skipped.append(str(a.get("name") or "allegato"))
-                hist = [{k: m[k] for k in ("role", "content", "thought", "thoughtSecs") if k in m}
+                hist = [{k: m[k] for k in ("role", "content", "thought", "thoughtSecs", "steps") if k in m}
                         for m in (c.get("history") or []) if isinstance(m, dict)]
                 at = CHATS.save({"id": str(c.get("id") or ""), "title": str(c.get("title") or "Chat")[:120],
                                  "history": hist, "docs": docs})
@@ -1701,6 +1705,7 @@ def _launcher_watchdog():
 if __name__ == "__main__":
     import shutil
     shutil.rmtree(UPLOAD_DIR, ignore_errors=True)  # upload orfani di sessioni precedenti
+    agent.cleanup_orphans()  # processi dell'agente sopravvissuti a un backend ucciso
     srv = GephidServer(("127.0.0.1", PORT), H)  # solo loopback
     # Server HTTP su thread daemon; il main thread carica il modello e poi fa da worker.
     # MLX richiede che le ops del modello girino sul thread che ha caricato i pesi.

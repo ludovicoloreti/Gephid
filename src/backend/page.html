@@ -113,6 +113,10 @@
   .hljs-meta,.hljs-tag,.hljs-name{color:var(--dim)}
   .hljs-variable,.hljs-params{color:var(--text-soft)}
   /* azioni del messaggio utente: compaiono al passaggio del mouse */
+  #log .turn:not(:last-child) .act[data-k="regen"]{display:none}  /* Rigenera solo sull'ultima risposta */
+  .editbar{display:flex;align-items:center;gap:10px;font-size:12px;color:var(--amber);margin-bottom:10px}
+  .editbar button{font:inherit;color:var(--dim);background:transparent;border:1px solid var(--border);border-radius:6px;padding:1px 8px;cursor:pointer}
+  .turn.editing .cbody{border-left-color:var(--amber)}
   .turn.user .meta{opacity:0;transition:opacity .15s;margin-top:6px}
   .turn.user:hover .meta,.turn.user .meta:focus-within{opacity:1}
   .msg table{border-collapse:collapse;margin:11px 0;font-size:.95em}
@@ -319,6 +323,7 @@
 
 <div class="composer"><div class="inner">
   <div class="recline hidden" id="recline"><span class="rd"></span><span class="mono"><span data-i18n="rec · in ascolto">rec · listening</span> <span id="recTime">0:00</span></span></div>
+  <div class="editbar hidden" id="editbar"><span class="mono" data-i18n="Modifica del messaggio: inviando, la conversazione riparte da qui">Editing a message: sending restarts the conversation from here</span><button id="editCancel" data-i18n="Annulla">Cancel</button></div>
   <div class="procbar" id="procbar"></div>
   <div class="chiprow" id="chiprow"></div>
   <div class="cmd" id="cmd">
@@ -708,7 +713,7 @@ function paintSeg(barEl,filled){
 }
 let genStopped=false;
 async function send(){
-  if(busy){ genStopped=true; if(aborter)aborter.abort(); return; }
+  if(busy){ genStopped=true; denyPending(); if(aborter)aborter.abort(); return; }
   const txt=$('#ta').value.trim();
   // slash command (gli stessi degli hint): esegue l'azione, NON manda il testo al modello
   const sc=txt.match(/^\/(attach|export|compact)\s*$/i);  // solo il comando da solo: una frase che inizia con "/export ..." va al modello
@@ -719,6 +724,7 @@ async function send(){
     else if(cmd==='compact') compactChat();
     return; }
   if(attachments.some(a=>a.loading)) return; // ingest in corso: aspetta (i chip in ERRORE invece non bloccano)
+  if(editIdx!==null){ const i=editIdx; cancelEdit(); history=history.slice(0,i); saveChat(); renderHistory(); }  // modifica: riparte da qui
   // gli allegati restano nella chat: "fresh" = appena aggiunti (mostrati nel turno), gli altri valgono comunque
   const atts=attachments.filter(a=>a.id&&!a.sent);
   if(!txt && !atts.length) return;
@@ -756,7 +762,7 @@ async function generate(opts){
   const foot=el('div','meta mono'); foot.innerHTML='<button class="stop"><span class="sq"></span>Stop</button><span class="tps"><span class="toks">0</span> tok/s · '+curSteps+' step</span>';
   if(opts.body){ sb.insertBefore(head,body); sb.insertBefore(bar,body); sb.appendChild(foot); }
   else { sb.appendChild(head); sb.appendChild(bar); sb.appendChild(body); sb.appendChild(foot); }
-  foot.querySelector('.stop').onclick=()=>{ genStopped=true; if(aborter)aborter.abort(); };
+  foot.querySelector('.stop').onclick=()=>{ genStopped=true; denyPending(); if(aborter)aborter.abort(); };
   body.className='stream-txt msg';  // così il markdown live ha i margini compatti di .msg
   setBusy(true);
   const t0=Date.now(); const base= opts.body?(body.dataset.src||body.textContent):''; let acc=base; let errObj=null, lastTot=curSteps, draft='', lastStep=0, statusHold=0, finalTps=0;
@@ -838,7 +844,7 @@ async function generate(opts){
   // su Continue aggiorna l'assistant esistente invece di aggiungerne uno nuovo
   const entry={role:'assistant',content:acc}; if(thought){ entry.thought=thought; entry.thoughtSecs=thSecs; }
   if(steps.length) entry.steps=steps.map(x=>({label:x.label,status:x.status,summary:x.summary}));
-  sb.querySelectorAll('.confirm:not(.answered)').forEach(c=>c.classList.add('answered'));  // Stop durante una conferma
+  denyPending(sb);  // Stop durante una conferma: negata esplicitamente
   if(opts.cont && history.length && history[history.length-1].role==='assistant') Object.assign(history[history.length-1],{content:acc});
   else history.push(entry);
   sb.parentElement.dataset.h=history.length-1;
@@ -873,7 +879,7 @@ async function streamNDJSON(url,bodyObj,onObj,signal){
 $('#btnSend').onclick=send;
 $('#ta').addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); send(); } });
 $('#ta').addEventListener('input',function(){ this.style.height='auto'; this.style.height=Math.min(150,this.scrollHeight)+'px'; });  // 150 = max-height CSS della .ta
-function newChat(){ history=[]; attachments=[]; savedSig=null; sessionStorage.removeItem('gephid-saved'); $('#chiprow').innerHTML=''; chatId=(crypto.randomUUID?crypto.randomUUID():'c'+Date.now()); saveChat(); renderWelcome(); updateSend(); }
+function newChat(){ cancelEdit(); history=[]; attachments=[]; savedSig=null; sessionStorage.removeItem('gephid-saved'); $('#chiprow').innerHTML=''; chatId=(crypto.randomUUID?crypto.randomUUID():'c'+Date.now()); saveChat(); renderWelcome(); updateSend(); }
 /* ---- chat salvate: SOLO su richiesta. savedSig = firma della chat al momento del salvataggio ---- */
 let savedSig=null, afterDiscard=null;
 function chatSig(){ return history.length+':'+history.map(h=>h.content.length).join(',')+':'+chatAttachIds().join(','); }
@@ -899,7 +905,7 @@ async function openSavedList(){
     const op=el('button','tbtn'); op.textContent=(LANG==='it'?'Apri':'Open'); op.onclick=()=>{ $('#savedDlg').classList.add('hidden'); confirmDiscard(()=>openSaved(c.id)); };
     const del=el('button','stop'); del.textContent=(LANG==='it'?'Elimina':'Delete'); del.onclick=async()=>{
       if(del.dataset.armed!=='1'){ del.dataset.armed='1'; del.textContent=(LANG==='it'?'Conferma':'Confirm'); return; }  // niente confirm(): in WKWebView non funziona
-      await fetch('/api/chats/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:c.id})}); if(c.id===chatId) savedSig=null; openSavedList(); };
+      await fetch('/api/chats/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:c.id})}); if(c.id===chatId){ savedSig=null; sessionStorage.removeItem('gephid-saved'); } openSavedList(); };
     r.appendChild(op); r.appendChild(del); box.appendChild(r); });
   $('#savedDlg').classList.remove('hidden'); }
 async function openSaved(id){
@@ -992,7 +998,13 @@ function confirmCard(c){
     try{ await fetch('/api/agent/confirm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:c.token,allow})}); }catch(e){} };
   yes.onclick=()=>answer(true); no.onclick=()=>answer(false);
   cb.appendChild(yes); cb.appendChild(no); card.appendChild(t); card.appendChild(pre); card.appendChild(cb);
-  setTimeout(()=>yes.focus(),50); return card; }
+  card.dataset.token=c.token;
+  // NIENTE autofocus su Consenti: chi sta scrivendo nel campo approverebbe con uno spazio/Invio
+  return card; }
+/* Stop (o fine stream) con una conferma ancora aperta: la nega esplicitamente, così il worker non
+   resta in attesa fino al timeout */
+function denyPending(scope){ (scope||document).querySelectorAll('.confirm:not(.answered)').forEach(c=>{ c.classList.add('answered');
+  if(c.dataset.token) fetch('/api/agent/confirm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:c.token||c.dataset.token,allow:false})}).catch(()=>{}); }); }
 let procTimer=null;
 function renderProcs(list){ const bar=$('#procbar'); bar.innerHTML='';
   (list||[]).filter(p=>p.running).forEach(p=>{ const d=el('span','proc mono'); const dot=el('span','dot'); const t=el('span');
@@ -1050,16 +1062,27 @@ function stopDict(){ recording=false; clearInterval(dictTimer); if(window.gephid
 let _dictSet=false;
 $('#ta').addEventListener('input',()=>{ if(recording && !_dictSet){ dictBase=$('#ta').value; if(window.gephidDictReset)gephidDictReset(); } });
 
+/* ---- modifica di un messaggio: il testo torna nel campo, la cronologia si tronca solo all'invio ---- */
+let editIdx=null;
+function startEdit(idx){ cancelEdit(); editIdx=idx; const ta=$('#ta'); ta.value=history[idx].content;
+  ta.style.height='auto'; ta.style.height=Math.min(150,ta.scrollHeight)+'px'; ta.focus(); updateSend();
+  const t=document.querySelector('#log .turn[data-h="'+idx+'"]'); if(t) t.classList.add('editing');
+  $('#editbar').classList.remove('hidden'); }
+function cancelEdit(){ if(editIdx===null) return; editIdx=null; $('#editbar').classList.add('hidden');
+  document.querySelectorAll('#log .turn.editing').forEach(t=>t.classList.remove('editing')); }
+$('#editCancel').onclick=()=>{ cancelEdit(); $('#ta').value=''; $('#ta').style.height='auto'; updateSend(); };
+
 /* ---- per-message copy/download (delegation) ---- */
 $('#log').addEventListener('click',e=>{ const act=e.target.closest('.act'); if(!act)return;
   const turn=act.closest('.turn'); const body=turn&&turn.querySelector('.msg');
   // sorgente markdown grezza (dataset.src) quando c'è: il textContent del DOM reso duplica le formule KaTeX
   const txt=body?(body.dataset.src||body.textContent):'';
   const idx=turn&&turn.dataset.h!==undefined?+turn.dataset.h:-1;
-  if(act.dataset.k==='regen'||act.dataset.k==='edit'){
-    if(busy||idx<0||!history[idx]) return;
-    const old=history[idx].content; history=history.slice(0,idx); saveChat(); renderHistory();
-    if(act.dataset.k==='edit'){ const ta=$('#ta'); ta.value=old; ta.style.height='auto'; ta.style.height=Math.min(150,ta.scrollHeight)+'px'; ta.focus(); updateSend(); return; }
+  if(act.dataset.k==='edit'){  // NON tronca subito: solo all'invio (un clic sbagliato non deve perdere la chat)
+    if(busy||idx<0||!history[idx]) return; startEdit(idx); return; }
+  if(act.dataset.k==='regen'){
+    if(busy||idx<0||idx!==history.length-1||!history[idx]) return;  // solo l'ultima risposta
+    cancelEdit(); history=history.slice(0,idx); saveChat(); renderHistory();
     stickBottom=true; busy=true; (async()=>{ try{ await generate({}); } finally{ if(busy) setBusy(false); } })(); return; }
   if(act.dataset.k==='copy'){ copyText(txt).then(ok=>{ if(ok)toast(tr('Copied')); }); }
   else if(act.dataset.k==='dl'){ saveText('gephid-'+Date.now()+'.md',txt); }
@@ -1328,7 +1351,8 @@ function seedDemo(){
 }
 // a11y tastiera: Esc chiude modali/menu; Enter/Space attivano gli elementi role=button
 // (delegato sul document: copre anche i role=button creati DOPO il load — chip, menu export, meta)
-document.addEventListener('keydown',e=>{ if(e.key==='Escape'){ ['#settings','#confirm','#savedDlg'].forEach(s=>{const n=$(s);if(n)n.classList.add('hidden');}); const m=$('#expmenu'); if(m)m.remove(); } });
+document.addEventListener('keydown',e=>{ if(e.key==='Escape'&&editIdx!==null&&document.activeElement===$('#ta')){ $('#editCancel').click(); return; }
+  if(e.key==='Escape'){ ['#settings','#confirm','#savedDlg'].forEach(s=>{const n=$(s);if(n)n.classList.add('hidden');}); const m=$('#expmenu'); if(m)m.remove(); } });
 document.addEventListener('keydown',e=>{ const t=e.target;
   if((e.key==='Enter'||e.key===' ')&&t&&t.getAttribute&&t.getAttribute('role')==='button'){ e.preventDefault(); t.click(); } });
 // i controlli non-button (segmented, stepper) diventano raggiungibili e attivabili da tastiera

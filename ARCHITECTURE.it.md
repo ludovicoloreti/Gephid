@@ -74,9 +74,11 @@ Gephid/
 - **Sicurezza dell'agente**: l'output degli strumenti non è fidato. Gli strumenti file sono confinati
   nella cartella di lavoro (`safe_path`, symlink risolti); scrittura ed esecuzione di codice chiedono
   sempre il clic dell'utente (`/api/agent/confirm`, 300s senza risposta = negato). Il codice gira in
-  `sandbox-exec` (niente rete in uscita tranne localhost, scrittura solo nella sua cartella
-  temporanea, timeout 30s); un processo in background che ascolta oltre 127.0.0.1 viene fermato
-  (controllo con `lsof`), e tutti muoiono col backend.
+  `sandbox-exec`: nessuna connessione in uscita, nemmeno verso localhost (altrimenti potrebbe pilotare
+  le API di Gephid stessa), niente DNS, LaunchServices o Apple Events, scrittura solo nella sua
+  cartella temporanea, segreti non leggibili, timeout 30s. Un server avviato resta raggiungibile da
+  fuori, ma un gruppo di processi che ascolta oltre 127.0.0.1 viene fermato (controllo con `lsof`);
+  gli avanzi si ripuliscono all'avvio del backend e alla chiusura di Gephid.
 - **WKWebView**: non scarica via blob → salvataggio lato server (`/api/save`, in `~/Downloads` o nel
   percorso scelto col pannello di salvataggio nativo, solo dentro la home).
   `<input type=file>` non apre il picker → `gephidOpenFiles` (NSOpenPanel via bind); i pannelli

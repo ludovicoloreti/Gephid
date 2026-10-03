@@ -25,7 +25,8 @@ def test_calc():
     assert A.calc("sqrt(16) + 1") == "5"
     assert A.calc("1/3") .startswith("0.33333")
     assert A.calc("0.1 + 0.2") == "0.3"  # decimali esatti, niente 0.30000000000000004
-    for bad in ["__import__('os')", "open('x')", "9**9**9", "a.b", "[1]*10"]:
+    assert "e+" in A.calc("exp(100000)")  # numeri enormi in notazione scientifica
+    for bad in ["__import__('os')", "open('x')", "9**9**9", "a.b", "[1]*10", "1,000*3", "exp(10**7)"]:
         with pytest.raises(ValueError):
             A.calc(bad)
 
@@ -95,3 +96,40 @@ def test_processo_in_background_solo_loopback():
     r = A.run_code("python", "import http.server as h\nh.HTTPServer(('0.0.0.0', 8098), h.SimpleHTTPRequestHandler).serve_forever()",
                    background=True)
     assert not r["running"] and "127.0.0.1" in r["output"]  # in ascolto su tutte le interfacce: fermato
+
+
+def test_sandbox_non_raggiunge_localhost_ne_dns():
+    """Il codice NON deve poter parlare col backend di Gephid (127.0.0.1:8890 -> /api/save scrive ovunque)."""
+    import socket, threading
+    srv = socket.socket(); srv.bind(("127.0.0.1", 0)); srv.listen(1); port = srv.getsockname()[1]
+    try:
+        r = A.run_code("python", f"import socket\nsocket.create_connection(('127.0.0.1', {port}), timeout=3)", timeout=20)
+        assert r["exit"] != 0, r
+    finally:
+        srv.close()
+    r = A.run_code("python", "import socket\nsocket.getaddrinfo('example.com', 443)", timeout=20)
+    assert r["exit"] != 0 and "gaierror" in r["output"]
+    r = A.run_code("python", "print(open(%r).read(5))" % os.path.expanduser("~/.config/diffuchat/config.json"), timeout=20)
+    assert r["exit"] != 0  # segreti/config di Gephid non leggibili
+
+
+def test_server_figlio_su_tutte_le_interfacce_viene_fermato():
+    code = ("import os, http.server as h\n"
+            "if os.fork() == 0:\n"
+            "    h.HTTPServer(('0.0.0.0', 8099), h.SimpleHTTPRequestHandler).serve_forever()\n"
+            "else:\n"
+            "    import time; time.sleep(60)\n")
+    r = A.run_code("python", code, background=True)
+    import time; time.sleep(0.5)
+    assert not r["running"] or not A.procs_status(), r
+    import subprocess
+    assert not subprocess.run(["lsof", "-nP", "-iTCP:8099", "-sTCP:LISTEN"], capture_output=True, text=True).stdout
+
+
+def test_timeout_uccide_anche_i_figli():
+    code = "import os, time\nif os.fork() == 0:\n    time.sleep(120)\nelse:\n    time.sleep(120)\n"
+    r = A.run_code("python", code, timeout=2)
+    assert r["timeout"]
+    import subprocess, time; time.sleep(0.5)
+    # pattern stretto: il processo eseguito è <tmp>/gephid-run-XXXX/main.py
+    assert not subprocess.run(["pgrep", "-f", r"gephid-run-[A-Za-z0-9_]+/main\.py"], capture_output=True, text=True).stdout

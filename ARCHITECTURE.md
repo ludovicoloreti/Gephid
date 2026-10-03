@@ -73,9 +73,11 @@ Gephid/
   writes to `~/Library/Application Support/Gephid/chats`.
 - **Agent safety**: tool output is untrusted. File tools are confined to the working folder
   (`safe_path`, symlinks resolved); writing and running code always need the user's click
-  (`/api/agent/confirm`, 300s without an answer = deny). Code runs under `sandbox-exec` (no outbound
-  network except localhost, writes only in its temp folder, 30s timeout); a background process that
-  listens beyond 127.0.0.1 is killed (`lsof` check), and all of them die with the backend.
+  (`/api/agent/confirm`, 300s without an answer = deny). Code runs under `sandbox-exec`: no outbound
+  connections at all, not even to localhost (otherwise it could drive Gephid's own API), no DNS,
+  LaunchServices or Apple Events, writes only in its temp folder, secrets unreadable, 30s timeout. A
+  server it starts stays reachable from outside, but a process group listening beyond 127.0.0.1 is
+  killed (`lsof` check); leftovers are cleaned up when the backend starts and when Gephid quits.
 - **WKWebView**: it cannot download via blob → server-side save (`/api/save`, `~/Downloads` or the
   path chosen in the native save panel, home only). `<input type=file>` does not open the picker → `gephidOpenFiles` (NSOpenPanel via bind);
   native panels steal focus, so restore it with `inp.focus()` on return. `alert()/confirm()` do not

@@ -104,7 +104,11 @@ def calc(expr):
     if len(expr) > 300:
         raise ValueError("espressione troppo lunga")
     try:
-        tree = ast.parse(expr.replace("^", "**").replace(",", ".") if expr.count(",") and "(" not in expr else expr.replace("^", "**"), mode="eval")
+        # la virgola è ambigua (decimale italiano o separatore delle migliaia: "1,000"): niente
+        # interpretazioni silenziose in uno strumento "esatto", si chiede di usare il punto
+        if re.search(r"\d,\d", expr):
+            raise ValueError("usa il punto per i decimali e niente separatori delle migliaia (es. 1234.5)")
+        tree = ast.parse(expr.replace("^", "**"), mode="eval")
     except SyntaxError:
         raise ValueError("espressione non valida")
     D = decimal.Decimal
@@ -138,12 +142,12 @@ def calc(expr):
 
     try:
         v = ev(tree)
-    except (decimal.InvalidOperation, ZeroDivisionError, OverflowError, TypeError) as e:
+    except (decimal.DecimalException, ZeroDivisionError, OverflowError, TypeError) as e:
         raise ValueError("calcolo impossibile: " + type(e).__name__)
     if v == v.to_integral_value() and abs(v) < D(10) ** 28:
         return str(v.quantize(D(1)))
     s = format(v.normalize(ctx), "f")
-    return s
+    return s if len(s) <= 40 else format(v, ".20e")  # numeri enormi: notazione scientifica, niente finta precisione
 
 
 # ---------------------------------------------------------------- ricerca nei documenti della chat
@@ -216,6 +220,8 @@ class Workspace:
         for n in sorted(os.listdir(base))[:300]:
             if n.startswith("."): continue
             full = os.path.join(base, n)
+            try: safe_path(self.root, self._rel(full))
+            except ValueError: continue  # symlink che esce dalla cartella di lavoro: non mostrarlo
             if os.path.isdir(full): out.append(self._rel(full) + "/")
             else: out.append(f"{self._rel(full)}  ({os.path.getsize(full)} B)")
         return "\n".join(out) or "(cartella vuota)"
@@ -246,13 +252,14 @@ class Workspace:
                 if seen > 2000: break
                 full = os.path.join(dirpath, n)
                 try:
+                    safe_path(self.root, self._rel(full))  # un symlink a un file fuori dalla cartella: salta
                     if os.path.getsize(full) > 2 * 1024 * 1024: continue
                     with open(full, encoding="utf-8", errors="ignore") as f:
                         for ln, line in enumerate(f, 1):
                             if q in line.lower():
                                 hits.append(f"{self._rel(full)}:{ln}: {line.strip()[:200]}")
                                 if len(hits) >= 60: return "\n".join(hits) + "\n[... altri risultati omessi]"
-                except OSError:
+                except (OSError, ValueError):
                     continue
         return "\n".join(hits) or "Nessun risultato."
 
@@ -260,7 +267,9 @@ class Workspace:
         p = safe_path(self.root, path)
         exists = os.path.exists(p)
         head = f"{self._rel(p)} · {len(content.encode())} B" + (" · SOVRASCRIVE il file esistente" if exists else " · nuovo file")
-        return head + "\n\n" + content[:2000] + ("\n[...]" if len(content) > 2000 else "")
+        shown = content[:20000]
+        rest = len(content) - len(shown)
+        return head + "\n\n" + shown + (f"\n[... altri {rest} caratteri non mostrati]" if rest else "")
 
     def write_file(self, path, content):
         p = safe_path(self.root, path)
@@ -298,6 +307,7 @@ def _write_docx(path, md):
 PROCS = {}       # id -> {"proc", "cmd", "dir", "started", "log"}
 _PROCS_LOCK = threading.Lock()
 RUN_TIMEOUT = 30
+MAX_CODE = 20000  # oltre, l'utente non può davvero rivedere il codice prima di approvarlo
 
 
 def _node_bin():
@@ -308,24 +318,37 @@ def _node_bin():
     return next((c for c in cands if c and os.path.isfile(c) and os.access(c, os.X_OK)), None)
 
 
+# Segreti che il codice non deve poter leggere (la lettura del resto serve: Python/Node vivono anche in home).
+_NO_READ = ["~/.ssh", "~/.aws", "~/.gnupg", "~/.config/diffuchat", "~/Library/Keychains", "~/Library/Cookies",
+            "~/Library/Application Support/Gephid", "~/Library/Mail", "~/Library/Messages"]
+
+
 def _profile(workdir):
-    # rete: in uscita solo localhost; file: scrittura solo nella cartella temporanea del lavoro.
-    w = os.path.realpath(workdir).replace('"', "")
-    tmp = os.path.realpath(tempfile.gettempdir()).replace('"', "")
+    """Profilo sandbox-exec. Verificato dal vivo (2026-10-04):
+    - NESSUNA connessione in uscita, nemmeno verso localhost: la regola "localhost:*" lasciava raggiungere
+      il backend di Gephid (127.0.0.1:8890, da cui si può scrivere ovunque nella home) e una deny sulla
+      sola porta 8890 NON ha effetto. Un server avviato qui dentro resta raggiungibile dall'esterno
+      (le connessioni in ingresso non sono "outbound").
+    - DNS (dnssd), LaunchServices (`open`) e Apple Events negati: niente uscite laterali.
+    - scrittura solo nella cartella del lavoro; niente lettura dei segreti in _NO_READ.
+    NB: il bind su 0.0.0.0 NON è bloccabile da qui: lo intercetta il controllo con lsof."""
+    q = lambda p: os.path.realpath(os.path.expanduser(p)).replace('"', "")
+    no_read = " ".join(f'(subpath "{q(p)}")' for p in _NO_READ)
     return f"""(version 1)
 (allow default)
 (deny network-outbound)
-(allow network-outbound (remote ip "localhost:*"))
-(allow network-outbound (remote unix-socket))
+(deny mach-lookup (global-name "com.apple.dnssd.service") (global-name "com.apple.coreservices.launchservicesd") (global-name-prefix "com.apple.lsd"))
+(deny appleevent-send)
 (deny file-write*)
-(allow file-write* (subpath "{w}") (subpath "{tmp}") (subpath "/dev"))
+(allow file-write* (subpath "{q(workdir)}") (subpath "/dev"))
+(deny file-read* {no_read})
 """
 
 
 def _listen_addrs(pid):
-    """Indirizzi su cui il processo è in ascolto TCP, via lsof."""
+    """Indirizzi su cui il processo E I SUOI FIGLI (stesso gruppo) sono in ascolto TCP, via lsof."""
     try:
-        out = subprocess.run(["lsof", "-nP", "-a", "-iTCP", "-sTCP:LISTEN", "-p", str(pid), "-F", "n"],
+        out = subprocess.run(["lsof", "-nP", "-a", "-iTCP", "-sTCP:LISTEN", "-g", str(pid), "-F", "n"],
                              capture_output=True, text=True, timeout=4).stdout
     except Exception:
         return []
@@ -358,25 +381,28 @@ def run_code(lang, code, timeout=RUN_TIMEOUT, background=False):
         f.write(_profile(work))
     env = {"PATH": "/usr/bin:/bin", "HOME": work, "TMPDIR": work, "PYTHONDONTWRITEBYTECODE": "1", "LANG": "en_US.UTF-8"}
     full = ["/usr/bin/sandbox-exec", "-f", prof] + cmd
+    # Gruppo di processi proprio (pgid = pid): Stop/timeout uccidono anche i figli, e lsof -g li vede.
+    # Se il backend muore di SIGKILL questi sopravvivrebbero: li ripulisce cleanup_orphans() all'avvio
+    # del backend e il launcher (pkill su "gephid-run-", il prefisso della loro cartella).
     if not background:
+        p = subprocess.Popen(full, cwd=work, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             text=True, start_new_session=True)
         try:
-            r = subprocess.run(full, cwd=work, env=env, capture_output=True, text=True, timeout=timeout)
-            out = (r.stdout + ("\n" + r.stderr if r.stderr else "")).strip()
-            return {"output": out[-8000:] or "(nessun output)", "exit": r.returncode, "timeout": False}
-        except subprocess.TimeoutExpired as e:
-            out = ((e.stdout or b"").decode(errors="ignore") if isinstance(e.stdout, bytes) else (e.stdout or ""))
-            return {"output": (out[-4000:] + f"\n[interrotto dopo {timeout}s]").strip(), "exit": -9, "timeout": True}
+            out, _ = p.communicate(timeout=timeout)
+            return {"output": (out or "").strip()[-8000:] or "(nessun output)", "exit": p.returncode, "timeout": False}
+        except subprocess.TimeoutExpired:
+            _killpg(p)
+            out, _ = p.communicate()
+            return {"output": ((out or "")[-4000:] + f"\n[interrotto dopo {timeout}s]").strip(), "exit": -9, "timeout": True}
         finally:
+            _killpg(p)  # eventuali figli rimasti (es. un fork in background) non sopravvivono
             shutil.rmtree(work, ignore_errors=True)
     log = os.path.join(work, ".out.log")
     lf = open(log, "w")
-    # stesso gruppo di processi del backend (niente nuova sessione): quando il launcher spegne il
-    # backend col kill del gruppo, muoiono anche i processi lanciati dall'agente. sandbox-exec fa exec
-    # del comando, quindi p è direttamente il processo Python/Node.
-    p = subprocess.Popen(full, cwd=work, env=env, stdout=lf, stderr=subprocess.STDOUT)
+    p = subprocess.Popen(full, cwd=work, env=env, stdout=lf, stderr=subprocess.STDOUT, start_new_session=True)
     pid = uuid.uuid4().hex[:8]
     with _PROCS_LOCK:
-        PROCS[pid] = {"proc": p, "cmd": lang, "dir": work, "started": time.time(), "log": log}
+        PROCS[pid] = {"proc": p, "cmd": lang, "dir": work, "started": time.time(), "log": log, "lf": lf}
     time.sleep(1.5)  # tempo di avviarsi (e di mettersi in ascolto, se è un server)
     addrs = _listen_addrs(p.pid) if p.poll() is None else []
     if addrs and not _loopback_only(addrs):
@@ -396,27 +422,39 @@ def proc_output(pid, tail=4000):
         return ""
 
 
+def _killpg(p):
+    try: os.killpg(p.pid, 9)
+    except Exception: pass
+
+
 def stop_proc(pid):
     with _PROCS_LOCK:
         e = PROCS.pop(pid, None)
     if not e: return False
-    try:
-        e["proc"].kill(); e["proc"].wait(timeout=3)
+    _killpg(e["proc"])
+    try: e["proc"].wait(timeout=3)
+    except Exception: pass
+    try: e["lf"].close()
     except Exception: pass
     shutil.rmtree(e["dir"], ignore_errors=True)
     return True
 
 
+def cleanup_orphans():
+    """All'avvio del backend: processi dell'agente sopravvissuti a un backend ucciso (SIGKILL)."""
+    try: subprocess.run(["pkill", "-9", "-f", "gephid-run-"], timeout=4, capture_output=True)
+    except Exception: pass
+
+
 def procs_status():
     out = []
     for pid, e in list(PROCS.items()):
-        alive = e["proc"].poll() is None
-        if alive:  # un server può mettersi in ascolto DOPO il controllo iniziale: ricontrolla
-            addrs = _listen_addrs(e["proc"].pid)
-            if addrs and not _loopback_only(addrs):
-                stop_proc(pid); continue
-        out.append({"id": pid, "lang": e["cmd"], "running": alive, "secs": int(time.time() - e["started"]),
-                    "listen": _listen_addrs(e["proc"].pid) if alive else []})
+        if e["proc"].poll() is not None:  # terminato: libera cartella e file di log
+            stop_proc(pid); continue
+        addrs = _listen_addrs(e["proc"].pid)  # un server può mettersi in ascolto DOPO il controllo iniziale
+        if addrs and not _loopback_only(addrs):
+            stop_proc(pid); continue
+        out.append({"id": pid, "lang": e["cmd"], "running": True, "secs": int(time.time() - e["started"]), "listen": addrs})
     return out
 
 
