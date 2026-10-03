@@ -41,39 +41,63 @@ def test_search_docs_trova_il_passaggio_giusto():
     assert A.search_docs(docs, "zzzz") == []
 
 
-# ---- confinamento nella cartella di lavoro ----
-def test_safe_path(tmp_path):
-    root = tmp_path / "lavoro"; (root / "sub").mkdir(parents=True)
-    assert A.safe_path(str(root), "sub/a.md") == str((root / "sub" / "a.md").resolve())
-    # percorso completo (o con ~) che punta DENTRO la cartella: accettato come relativo
-    assert A.safe_path(str(root), str(root)) == str(root.resolve())
-    assert A.safe_path(str(root), str(root / "sub" / "a.md")) == str((root / "sub" / "a.md").resolve())
-    for bad in ["../x", "/etc/passwd", "sub/../../x", "", str(root) + "-altro/x", "~/.ssh/id_rsa"]:
+# ---- file dell'utente: percorsi, permessi per cartella, sola scrittura di file nuovi ----
+@pytest.fixture
+def home(tmp_path, monkeypatch):
+    h = tmp_path / "home"
+    for d in ["Desktop", "Downloads", "Documents", "Library/Mail", ".ssh"]:
+        (h / d).mkdir(parents=True)
+    (h / "Desktop" / "a.md").write_text("ciao mondo\nseconda riga con PENALE\n")
+    (h / "Downloads" / "fattura.txt").write_text("totale 120 euro")
+    monkeypatch.setattr(A, "_home", lambda: str(h.resolve()))
+    return h.resolve()
+
+
+def test_resolve_user_path(home):
+    assert A.resolve_user_path("~/Desktop") == str(home / "Desktop")
+    assert A.resolve_user_path("Scrivania") == str(home / "Desktop")
+    assert A.resolve_user_path("scrivania/a.md") == str(home / "Desktop" / "a.md")
+    assert A.resolve_user_path(str(home / "Downloads" / "fattura.txt")) == str(home / "Downloads" / "fattura.txt")
+    assert A.resolve_user_path("Downloads") == str(home / "Downloads")
+    for bad in ["", "~", "/etc/passwd", "~/.ssh", "~/Library/Mail", "~/Desktop/../../x", "~/.zshrc"]:
         with pytest.raises(ValueError):
-            A.safe_path(str(root), bad) if bad else A.safe_path(str(root), "..")
-    os.symlink("/tmp", root / "esce")
+            A.resolve_user_path(bad)
+    os.symlink("/tmp", home / "Desktop" / "esce")
     with pytest.raises(ValueError):
-        A.safe_path(str(root), "esce/x")
-    with pytest.raises(ValueError):
-        A.safe_path("", "a.md")  # nessuna cartella autorizzata
+        A.resolve_user_path("~/Desktop/esce/x")
 
 
-def test_file_tools(tmp_path):
-    root = str(tmp_path)
-    (tmp_path / "a.md").write_text("ciao mondo\nseconda riga con PENALE\n")
-    (tmp_path / "d").mkdir(); (tmp_path / "d" / "b.txt").write_text("niente")
-    ws = A.Workspace(root, extract=lambda name, data: data.decode())
-    assert "a.md" in ws.list_files(".") and "d/" in ws.list_files(".")
-    assert "seconda riga" in ws.read_file("a.md")
-    assert "a.md:2" in ws.grep("penale")
-    prev = ws.write_preview("nuovo/c.md", "# Titolo\ntesto")
-    assert "nuovo/c.md" in prev and "Titolo" in prev
-    out = ws.write_file("nuovo/c.md", "# Titolo\ntesto")
-    assert os.path.exists(tmp_path / "nuovo" / "c.md") and "scritto" in out.lower()
-    ws.write_file("doc.docx", "# Titolo\n\nParagrafo uno.\n\n- punto")
+def test_permesso_per_cartella(home):
+    f = A.UserFiles(lambda name, data: data.decode(), set())
+    assert f.need_grant("~/Desktop") == str(home / "Desktop")          # da chiedere
+    assert f.need_grant("~/Desktop/a.md") == str(home / "Desktop")     # file -> la sua cartella
+    with pytest.raises(ValueError):
+        f.list_files("~/Desktop")                                      # senza permesso non legge
+    f.grants.add(str(home / "Desktop"))
+    assert f.need_grant("~/Desktop/a.md") is None
+    assert "a.md" in f.list_files("Scrivania") and "1 elementi" in f.list_files("~/Desktop")
+    assert "seconda riga" in f.read_file("~/Desktop/a.md")
+    assert "a.md:2" in f.grep("penale", "~/Desktop")
+    with pytest.raises(ValueError):
+        f.read_file("~/Downloads/fattura.txt")                         # altra cartella: altro permesso
+    assert "Scrivania" in A.folder_label(str(home / "Desktop"))
+
+
+def test_scrittura_solo_file_nuovi(home):
+    f = A.UserFiles(lambda n, d: d.decode(), set())
+    with pytest.raises(ValueError):
+        f.write_preview("~/Desktop/a.md", "x")                         # esiste: mai sovrascrivere
+    assert (home / "Desktop" / "a.md").read_text().startswith("ciao")
+    assert "nuovo file" in f.write_preview("~/Desktop/c.md", "# Titolo")
+    assert "creato" in f.write_file("~/Desktop/c.md", "# Titolo\ntesto").lower()
+    f.write_file("~/Desktop/doc.docx", "# Titolo\n\nParagrafo uno.\n\n- punto")
     import docx
-    d = docx.Document(str(tmp_path / "doc.docx"))
+    d = docx.Document(str(home / "Desktop" / "doc.docx"))
     assert [p.text for p in d.paragraphs if p.text] == ["Titolo", "Paragrafo uno.", "punto"]
+    with pytest.raises(ValueError):
+        f.write_file("~/Desktop/manca/x.md", "x")                      # cartella inesistente
+    with pytest.raises(ValueError):
+        f.write_file("~/.ssh/authorized_keys2", "x")                   # posizione riservata
 
 
 # ---- esecuzione codice in sandbox ----
@@ -136,16 +160,6 @@ def test_timeout_uccide_anche_i_figli():
     import subprocess, time; time.sleep(0.5)
     # pattern stretto: il processo eseguito è <tmp>/gephid-run-XXXX/main.py
     assert not subprocess.run(["pgrep", "-f", r"gephid-run-[A-Za-z0-9_]+/main\.py"], capture_output=True, text=True).stdout
-
-
-def test_scrittura_solo_file_nuovi(tmp_path):
-    (tmp_path / "esiste.md").write_text("originale")
-    ws = A.Workspace(str(tmp_path), extract=lambda n, d: d.decode())
-    with pytest.raises(ValueError):
-        ws.write_preview("esiste.md", "x")
-    with pytest.raises(ValueError):
-        ws.write_file("esiste.md", "x")
-    assert (tmp_path / "esiste.md").read_text() == "originale"
 
 
 def test_sandbox_niente_rm_shell_segnali(tmp_path):

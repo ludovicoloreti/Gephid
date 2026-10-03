@@ -184,27 +184,53 @@ def search_docs(docs, query, k=4):
     return sorted(res, key=lambda r: -r["score"])[:k]
 
 
-# ---------------------------------------------------------------- cartella di lavoro
-def safe_path(root, rel):
-    """Percorso dentro la cartella di lavoro (symlink risolti). ValueError se ne esce o non c'è root."""
-    if not root:
-        raise ValueError("Nessuna cartella di lavoro autorizzata: sceglila in Impostazioni → Agente.")
-    rootr = os.path.realpath(root)
-    rel = os.path.expanduser(str(rel or "").strip())
-    if os.path.isabs(rel):
-        # il modello spesso ripete il percorso completo che gli abbiamo indicato: se punta DENTRO la
-        # cartella di lavoro lo si accetta come relativo, altrimenti resta vietato
-        ar = os.path.realpath(rel)
-        if ar == rootr: rel = "."
-        elif ar.startswith(rootr + os.sep): rel = os.path.relpath(ar, rootr)
-        else: raise ValueError("Percorso fuori dalla cartella di lavoro: non consentito.")
-    if not rel:
-        raise ValueError("Usa un percorso relativo alla cartella di lavoro.")
-    p = os.path.realpath(os.path.join(rootr, rel))
-    if rel == ".": return rootr
-    if p != rootr and not p.startswith(rootr + os.sep):
-        raise ValueError("Percorso fuori dalla cartella di lavoro: non consentito.")
-    return p
+# ---------------------------------------------------------------- file dell'utente (con permesso per cartella)
+# L'utente dice "guarda la Scrivania": l'agente usa direttamente ~/Desktop e Gephid chiede in chat il
+# permesso di leggere QUELLA cartella (sola lettura, finché l'app resta aperta). Mai chiedere di
+# andare nelle Impostazioni. Fuori portata, senza nemmeno chiedere: tutto ciò che sta fuori dalla
+# home, la home intera, ~/Library e file/cartelle nascosti (.ssh, .config, ...).
+FOLDER_ALIASES = {"desktop": "~/Desktop", "scrivania": "~/Desktop", "download": "~/Downloads",
+                  "downloads": "~/Downloads", "scaricati": "~/Downloads", "documenti": "~/Documents",
+                  "documents": "~/Documents", "immagini": "~/Pictures", "pictures": "~/Pictures",
+                  "foto": "~/Pictures"}
+FOLDER_NAMES = {"Desktop": "Scrivania", "Downloads": "Download", "Documents": "Documenti", "Pictures": "Immagini"}
+
+
+def _home():
+    return os.path.realpath(os.path.expanduser("~"))
+
+
+def resolve_user_path(p):
+    """Percorso indicato dal modello -> percorso reale dentro la home, o ValueError se fuori portata.
+    Accetta "~/Desktop/x", percorsi assoluti, nomi come "Scrivania"/"Download", percorsi relativi alla home."""
+    raw = str(p or "").strip().strip('"').strip("'")
+    if not raw:
+        raise ValueError("Indica quale file o cartella (es. ~/Desktop, ~/Downloads/fattura.pdf).")
+    first, _, rest = raw.replace("\\", "/").partition("/")
+    if first.lower().strip() in FOLDER_ALIASES:
+        raw = FOLDER_ALIASES[first.lower().strip()] + ("/" + rest if rest else "")
+    home = _home()
+    if raw == "~" or raw.startswith("~/"): raw = home + raw[1:]
+    r = os.path.realpath(raw if os.path.isabs(raw) else os.path.join(home, raw))
+    if r == home:
+        raise ValueError("La home intera è troppo ampia: indica una cartella (Scrivania, Download, Documenti...).")
+    if not r.startswith(home + os.sep):
+        raise ValueError("Posso guardare solo dentro la tua home (Scrivania, Download, Documenti...).")
+    parts = os.path.relpath(r, home).split(os.sep)
+    if parts[0] == "Library" or any(x.startswith(".") for x in parts):
+        raise ValueError("Questa posizione è riservata (impostazioni, chiavi, posta...): non la guardo.")
+    return r
+
+
+def nice_path(r):
+    home = _home()
+    return "~" + r[len(home):] if r.startswith(home) else r
+
+
+def folder_label(folder):
+    """'leggere la cartella Scrivania (~/Desktop)' — per la scheda di permesso."""
+    base = os.path.basename(folder)
+    return f"leggere la cartella {FOLDER_NAMES.get(base, base)} ({nice_path(folder)})"
 
 
 TEXT_EXT = {".txt", ".md", ".markdown", ".csv", ".json", ".py", ".js", ".ts", ".html", ".css", ".xml", ".yaml",
@@ -212,32 +238,50 @@ TEXT_EXT = {".txt", ".md", ".markdown", ".csv", ".json", ".py", ".js", ".ts", ".
 MAX_READ = 40000  # caratteri restituiti al modello per un file
 
 
-class Workspace:
-    def __init__(self, root, extract):
-        self.root = root
+class UserFiles:
+    """Lettura dei file dell'utente nelle cartelle CONSENTITE (grants: permessi dati in chat per questa
+    sessione + l'eventuale cartella sempre consentita delle Impostazioni). Scrittura: solo file nuovi."""
+
+    def __init__(self, extract, grants):
         self.extract = extract  # (nome, bytes) -> testo: riusa l'estrazione PDF/Word/Excel del backend
+        self.grants = grants    # insieme di cartelle (percorsi reali) già consentite
 
-    def _rel(self, p):
-        return os.path.relpath(p, os.path.realpath(self.root))
+    def is_allowed(self, r):
+        return any(r == g or r.startswith(g + os.sep) for g in self.grants)
 
-    def list_files(self, folder="."):
-        base = safe_path(self.root, folder) if folder not in (".", "", "/", "./") else os.path.realpath(self.root)
+    @staticmethod
+    def folder_of(r):
+        return r if os.path.isdir(r) else os.path.dirname(r)
+
+    def need_grant(self, path):
+        """None se si può leggere subito, altrimenti la cartella da chiedere all'utente."""
+        r = resolve_user_path(path)
+        return None if self.is_allowed(r) else self.folder_of(r)
+
+    def _check(self, path):
+        r = resolve_user_path(path)
+        if not self.is_allowed(r):
+            raise ValueError("Permesso di lettura non concesso per " + nice_path(self.folder_of(r)))
+        return r
+
+    def list_files(self, folder):
+        base = self._check(folder)
         if not os.path.isdir(base):
-            raise ValueError("Cartella inesistente.")
-        out = []
-        for n in sorted(os.listdir(base))[:300]:
-            if n.startswith("."): continue
+            raise ValueError("Cartella inesistente: " + nice_path(base))
+        out, names = [], sorted(n for n in os.listdir(base) if not n.startswith("."))
+        for n in names[:300]:
             full = os.path.join(base, n)
-            try: safe_path(self.root, self._rel(full))
-            except ValueError: continue  # symlink che esce dalla cartella di lavoro: non mostrarlo
-            if os.path.isdir(full): out.append(self._rel(full) + "/")
-            else: out.append(f"{self._rel(full)}  ({os.path.getsize(full)} B)")
-        return "\n".join(out) or "(cartella vuota)"
+            try: self._check(full)
+            except ValueError: continue  # symlink che porta fuori portata: non mostrarlo
+            if os.path.isdir(full): out.append(n + "/")
+            else: out.append(f"{n}  ({os.path.getsize(full)} B)")
+        head = f"{nice_path(base)}: {len(names)} elementi" + (" (mostrati i primi 300)" if len(names) > 300 else "")
+        return head + "\n" + ("\n".join(out) or "(cartella vuota)")
 
     def read_file(self, path):
-        p = safe_path(self.root, path)
+        p = self._check(path)
         if not os.path.isfile(p):
-            raise ValueError("File inesistente.")
+            raise ValueError("File inesistente: " + nice_path(p))
         if os.path.getsize(p) > 80 * 1024 * 1024:
             raise ValueError("File troppo grande.")
         with open(p, "rb") as f:
@@ -246,8 +290,8 @@ class Workspace:
             return text[:MAX_READ] + f"\n\n[... troncato: mostrati {MAX_READ} caratteri su {len(text)}]"
         return text
 
-    def grep(self, query, folder="."):
-        base = safe_path(self.root, folder) if folder not in (".", "", "/") else os.path.realpath(self.root)
+    def grep(self, query, folder):
+        base = self._check(folder)
         q = (query or "").lower()
         if not q:
             raise ValueError("Testo da cercare mancante.")
@@ -260,40 +304,42 @@ class Workspace:
                 if seen > 2000: break
                 full = os.path.join(dirpath, n)
                 try:
-                    safe_path(self.root, self._rel(full))  # un symlink a un file fuori dalla cartella: salta
+                    self._check(full)  # un symlink che porta fuori: salta
                     if os.path.getsize(full) > 2 * 1024 * 1024: continue
                     with open(full, encoding="utf-8", errors="ignore") as f:
                         for ln, line in enumerate(f, 1):
                             if q in line.lower():
-                                hits.append(f"{self._rel(full)}:{ln}: {line.strip()[:200]}")
+                                hits.append(f"{nice_path(full)}:{ln}: {line.strip()[:200]}")
                                 if len(hits) >= 60: return "\n".join(hits) + "\n[... altri risultati omessi]"
                 except (OSError, ValueError):
                     continue
         return "\n".join(hits) or "Nessun risultato."
 
-    def _new_target(self, path):
+    @staticmethod
+    def new_target(path):
         """L'agente crea SOLO file nuovi: mai modificare, sovrascrivere o cancellare quelli dell'utente."""
-        p = safe_path(self.root, path)
+        p = resolve_user_path(path)
         if os.path.lexists(p):
-            raise ValueError(f"{self._rel(p)} esiste già: posso solo creare file nuovi, scegli un altro nome.")
+            raise ValueError(f"{nice_path(p)} esiste già: posso solo creare file nuovi, scegli un altro nome.")
+        if not os.path.isdir(os.path.dirname(p)):
+            raise ValueError("Cartella inesistente: " + nice_path(os.path.dirname(p)))
         return p
 
     def write_preview(self, path, content):
-        p = self._new_target(path)
-        head = f"{self._rel(p)} · {len(content.encode())} B · nuovo file"
+        p = self.new_target(path)
         shown = content[:20000]
         rest = len(content) - len(shown)
-        return head + "\n\n" + shown + (f"\n[... altri {rest} caratteri non mostrati]" if rest else "")
+        return (f"{nice_path(p)} · {len(content.encode())} B · nuovo file\n\n" + shown +
+                (f"\n[... altri {rest} caratteri non mostrati]" if rest else ""))
 
     def write_file(self, path, content):
-        p = self._new_target(path)
-        os.makedirs(os.path.dirname(p), exist_ok=True)
+        p = self.new_target(path)
         if p.lower().endswith(".docx"):
             _write_docx(p, content)
         else:
             with open(p, "x", encoding="utf-8") as f:  # "x": fallisce se nel frattempo il file è comparso
                 f.write(content)
-        return f"File scritto: {self._rel(p)} ({os.path.getsize(p)} B)."
+        return f"File creato: {nice_path(p)} ({os.path.getsize(p)} B)."
 
 
 def _write_docx(path, md):
@@ -502,19 +548,23 @@ TOOLS_BASE = [
         {"linguaggio": {"type": "string", "enum": ["python", "node"]}, "codice": S, "in_background": {"type": "boolean"}},
         ["linguaggio", "codice"]),
 ]
+_P = {"type": "string", "description": "percorso, es. ~/Desktop, ~/Downloads/fattura.pdf, ~/Documents/note.md"}
 TOOLS_FILES = [
-    _fn("elenca_file", "Elenca file e sottocartelle nella cartella di lavoro dell'utente.", {"cartella": S}),
-    _fn("leggi_file", "Legge un file della cartella di lavoro (testo, PDF, Word, Excel).", {"path": S}, ["path"]),
-    _fn("cerca_nei_file", "Cerca un testo nei file di testo della cartella di lavoro.", {"testo": S, "cartella": S}, ["testo"]),
-    _fn("scrivi_file", "Crea un NUOVO file nella cartella di lavoro (md, txt, csv, json, docx...). Non può modificare, "
+    _fn("elenca_file", "Elenca file e sottocartelle di una cartella dell'utente (es. ~/Desktop). La prima volta "
+        "Gephid chiede all'utente il permesso di leggere quella cartella.", {"cartella": _P}, ["cartella"]),
+    _fn("leggi_file", "Legge un file dell'utente (testo, PDF, Word, Excel), es. ~/Downloads/contratto.pdf.",
+        {"path": _P}, ["path"]),
+    _fn("cerca_nei_file", "Cerca un testo nei file di testo di una cartella dell'utente.", {"testo": S, "cartella": _P},
+        ["testo", "cartella"]),
+    _fn("scrivi_file", "Crea un NUOVO file (md, txt, csv, json, docx...) in una cartella dell'utente. Non può modificare, "
         "sovrascrivere né cancellare file esistenti. L'utente deve approvare.",
-        {"path": S, "contenuto": S}, ["path", "contenuto"]),
+        {"path": _P, "contenuto": S}, ["path", "contenuto"]),
 ]
 CONFIRM = {"scrivi_file", "esegui_codice"}
 
 
-def schemas(has_workspace):
-    return TOOLS_BASE + (TOOLS_FILES if has_workspace else [])
+def schemas():
+    return TOOLS_BASE + TOOLS_FILES
 
 
 def now_text():

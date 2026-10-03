@@ -30,13 +30,15 @@ computer.
 - **Ragiona** (spento di default): il modello ragiona prima di rispondere; vedi il ragionamento
   scorrere, poi si compatta in una riga "Ha ragionato · 8s" che puoi riaprire con un clic.
 - **Agente** (spento di default): Gephid usa strumenti locali, nessuno dei quali tocca la rete:
-  calcolatrice esatta, ricerca nei documenti della chat e, in una **cartella di lavoro scelta da te**,
-  elenca/leggi/cerca file e ne crea di **nuovi** (sempre con anteprima e scheda Consenti/Nega; non può
-  mai modificare, sovrascrivere o cancellare i tuoi file). Può anche eseguire un breve programma
+  calcolatrice esatta, ricerca nei documenti della chat e i tuoi file: gli dici "guarda la Scrivania"
+  o "leggi la fattura nei Download" e ti chiede, direttamente in chat, il permesso di **leggere quella
+  cartella** (un clic, sola lettura, finché Gephid resta aperta). Può creare file **nuovi** (sempre con
+  anteprima e scheda Consenti/Nega) ma mai modificare, sovrascrivere o cancellare i tuoi, e non guarda
+  mai fuori dalla home, in `~/Library` o nelle cartelle nascoste come `.ssh`. Può anche eseguire un breve programma
   **Python o Node** in una sandbox di macOS (niente rete, nessun altro programma — niente `rm`, niente
   shell —, scrittura solo in una cartella temporanea, limite di 30s), sempre dopo il tuo consenso; i
-  server lasciati attivi possono ascoltare solo su 127.0.0.1. Senza cartella di lavoro ti spiega come
-  sceglierla.
+  server lasciati attivi possono ascoltare solo su 127.0.0.1. Nelle Impostazioni puoi indicare una
+  cartella sempre consentita (facoltativa).
 - **Allegati che restano nella conversazione**: alleghi un documento una volta e ci fai tutte le
   domande che vuoi.
   - Immagini: il modello le vede (vision). Si incollano anche con ⌘V.

@@ -30,12 +30,14 @@ leaves your computer.
 - **Think** (off by default): the model reasons before answering; you watch the reasoning stream,
   then it folds into a one-line "Thought · 8s" you can click to reopen.
 - **Agent** (off by default): Gephid can use local tools, none of which touches the network: an exact
-  calculator, search inside the chat's documents, and, in a **working folder you choose**, list/read/
-  search files and create **new** ones (always with a preview and an Allow/Deny card; it can never
-  modify, overwrite or delete your files). It can also run a short **Python or Node** program in a
+  calculator, search inside the chat's documents, and your files: say "look at the Desktop" or "read
+  the invoice in Downloads" and it asks, right in the chat, to **read that folder** (one click, read-only,
+  until you quit Gephid). It can create **new** files (always with a preview and an Allow/Deny card)
+  but never modify, overwrite or delete yours, and never looks outside your home, in `~/Library` or in
+  hidden folders such as `.ssh`. It can also run a short **Python or Node** program in a
   macOS sandbox (no network, no other programs — no `rm`, no shell —, writes only to a temp folder,
   30s limit), again only after you allow it; long-running servers may listen on 127.0.0.1 only.
-  Without a working folder it tells you how to choose one.
+  An optional always-allowed folder can be set in Settings.
 - **Attachments that stay in the conversation**: attach a document once and ask about it as many
   times as you like.
   - Images: the model sees them (vision). Paste them with ⌘V.

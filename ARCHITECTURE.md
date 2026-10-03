@@ -80,9 +80,11 @@ Gephid/
   engage with DiffusionGemma (verified), so long documents are re-read each turn.
 - **Nothing is saved unless asked**: the current chat lives in `sessionStorage`; only "Save chat"
   writes to `~/Library/Application Support/Gephid/chats`.
-- **Agent safety**: tool output is untrusted. File tools are confined to the working folder
-  (`safe_path`, symlinks resolved; a full path pointing inside it is accepted); the agent can only
-  create NEW files, never modify, overwrite or delete; writing and running code always need the user's click
+- **Agent safety**: tool output is untrusted. File tools resolve the path the model gives
+  ("Scrivania", `~/Downloads/x.pdf`, ...) inside the home only, never `~/Library` or hidden folders
+  (`resolve_user_path`, symlinks resolved); the first read of a folder asks the user in the chat and the
+  grant lives in RAM for the session (`GRANTS`, plus the optional always-allowed folder); the agent can
+  only create NEW files, never modify, overwrite or delete; writing and running code always need the user's click
   (`/api/agent/confirm`, 300s without an answer = deny). Code runs under `sandbox-exec`: no outbound
   connections at all, not even to localhost (otherwise it could drive Gephid's own API), no DNS,
   LaunchServices or Apple Events, no exec of anything but the interpreter (no `rm`, shell, `osascript`),

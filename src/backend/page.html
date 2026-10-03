@@ -369,7 +369,7 @@
         <div class="seg" data-seg="ocr" style="margin-bottom:10px"><span class="o" data-v="apple">Fast</span><span class="o" data-v="local" data-i18n="Avanzato">Advanced</span><span class="o" data-v="omlx" data-i18n="Massima fedeltà">Max fidelity</span></div>
         <div class="ocrhint" data-i18n="Fast: motore di sistema Apple. Avanzato: modello locale dedicato. Massima fedeltà: instrada ogni pagina al motore migliore.">Fast: Apple system engine. Advanced: dedicated local model. Max fidelity: routes each page to the best engine.</div></div>
       <div class="sect"><div class="slabel mono" data-i18n="Agente">Agent</div>
-        <div class="rh" data-i18n="Cartella che l'agente può leggere e in cui può scrivere (ogni scrittura chiede conferma). Nessuna = niente strumenti sui file.">Folder the agent can read and write in (every write asks first). None = no file tools.</div>
+        <div class="rh" data-i18n="L'agente chiede in chat il permesso di leggere una cartella la prima volta che gli serve. Qui puoi indicarne una sempre consentita (facoltativo). Non può mai modificare o cancellare file.">The agent asks in the chat before reading a folder the first time. Here you can set one that is always allowed (optional). It can never modify or delete files.</div>
         <div class="mrow" style="margin-top:10px"><span class="mn mono" id="wsPath" style="font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0"></span></div>
         <div class="saverow"><button class="btn-accent" id="wsPick" data-i18n="Scegli cartella…">Choose folder…</button><span class="note" id="wsClear" style="cursor:pointer;text-decoration:underline" data-i18n="Nessuna">None</span></div></div>
       <div class="sect"><div class="slabel mono" data-i18n="Istruzioni al modello">Model instructions</div>
@@ -1015,8 +1015,7 @@ function renderProcs(list){ const bar=$('#procbar'); bar.innerHTML='';
 function applyAgent(){ const on=localStorage.getItem('gephid-agent')==='on'; const b=$('#btnAgent'); b.classList.toggle('on',on); b.setAttribute('aria-pressed',on?'true':'false'); }
 let curWorkspace='';
 $('#btnAgent').onclick=()=>{ localStorage.setItem('gephid-agent',localStorage.getItem('gephid-agent')==='on'?'off':'on'); applyAgent(); $('#ta').focus();
-  // senza cartella di lavoro l'agente non vede i file: dillo subito, non dopo un "non posso" del modello
-  if(localStorage.getItem('gephid-agent')==='on'&&!curWorkspace) toast(LANG==='it'?'Agente attivo. Per fargli leggere e scrivere file scegli una cartella in Impostazioni → Agente.':'Agent on. To let it read and write files, choose a folder in Settings → Agent.'); };
+};
 applyAgent();
 function showWs(p){ curWorkspace=p||''; const e=$('#wsPath'); if(e) e.textContent=p?p.replace(/^\/Users\/[^/]+/,'~'):(LANG==='it'?'nessuna cartella':'no folder'); }
 $('#wsPick').onclick=async()=>{ let p='';

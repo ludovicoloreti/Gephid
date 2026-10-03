@@ -80,9 +80,11 @@ Gephid/
   non si attiva con DiffusionGemma (verificato): i documenti lunghi si rileggono a ogni turno.
 - **Niente si salva se non richiesto**: la chat corrente vive in `sessionStorage`; solo "Salva chat"
   scrive in `~/Library/Application Support/Gephid/chats`.
-- **Sicurezza dell'agente**: l'output degli strumenti non è fidato. Gli strumenti file sono confinati
-  nella cartella di lavoro (`safe_path`, symlink risolti; un percorso completo che punta dentro è
-  accettato); l'agente crea solo file NUOVI, mai modifiche, sovrascritture o cancellazioni; scrittura
+- **Sicurezza dell'agente**: l'output degli strumenti non è fidato. Gli strumenti file risolvono il percorso
+  indicato dal modello ("Scrivania", `~/Downloads/x.pdf`, ...) solo dentro la home, mai `~/Library` o
+  cartelle nascoste (`resolve_user_path`, symlink risolti); la prima lettura di una cartella chiede il
+  permesso in chat e il permesso vive in RAM per la sessione (`GRANTS`, più l'eventuale cartella sempre
+  consentita); l'agente crea solo file NUOVI, mai modifiche, sovrascritture o cancellazioni; scrittura
   ed esecuzione di codice chiedono
   sempre il clic dell'utente (`/api/agent/confirm`, 300s senza risposta = negato). Il codice gira in
   `sandbox-exec`: nessuna connessione in uscita, nemmeno verso localhost (altrimenti potrebbe pilotare
