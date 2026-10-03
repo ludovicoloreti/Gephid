@@ -10,31 +10,109 @@ package main
 #import <Speech/Speech.h>
 #import <AVFoundation/AVFoundation.h>
 #include <stdlib.h>
-// Installa il menu "Modifica" standard: senza, in WKWebView Cmd+C/V/X/A non funzionano
-static void installEditMenu(void) {
+// Lingua dei testi nativi (menu, schermate di avvio): quella di macOS.
+static int gephidIsItalian(void) {
+  NSString *l = [[NSLocale preferredLanguages] firstObject];
+  return (l && [l hasPrefix:@"it"]) ? 1 : 0;
+}
+// Azioni di menu verso la pagina: il menu le accoda qui, Go le preleva (polling) e chiama
+// gephidMenu('azione') nella webview. Niente //export cgo: con un preambolo che DEFINISCE funzioni
+// cgo non lo consente, e una coda di una voce basta (nessuno clicca due menu in 100ms).
+static char g_menu_action[32] = {0};
+static NSLock *g_menu_lock = nil;
+@interface GephidMenuTarget : NSObject
+- (void)menuAction:(id)sender;
+@end
+@implementation GephidMenuTarget
+- (void)menuAction:(id)sender {
+  NSString *a = [sender representedObject];
+  if (!a) return;
+  [g_menu_lock lock];
+  strlcpy(g_menu_action, [a UTF8String], sizeof(g_menu_action));
+  [g_menu_lock unlock];
+}
+@end
+static GephidMenuTarget *g_menu_target = nil;
+static const char* gephidPopMenuAction(void) {
+  if (!g_menu_lock) return strdup("");
+  [g_menu_lock lock];
+  const char *c = strdup(g_menu_action);
+  g_menu_action[0] = 0;
+  [g_menu_lock unlock];
+  return c;
+}
+static NSMenuItem* addAct(NSMenu *m, NSString *title, NSString *action, NSString *key, NSEventModifierFlags mods) {
+  NSMenuItem *it = [m addItemWithTitle:title action:@selector(menuAction:) keyEquivalent:key];
+  [it setTarget:g_menu_target];
+  [it setRepresentedObject:action];
+  if (mods) [it setKeyEquivalentModifierMask:mods];
+  return it;
+}
+// Menu nativo completo e bilingue. Senza il menu "Modifica", in WKWebView Cmd+C/V/X/A non funzionano.
+static void installMenus(void) {
+  int it = gephidIsItalian();
+  g_menu_lock = [[NSLock alloc] init];
+  g_menu_target = [[GephidMenuTarget alloc] init];
+  NSEventModifierFlags cmd = NSEventModifierFlagCommand, cmdShift = NSEventModifierFlagCommand|NSEventModifierFlagShift;
   NSMenu *mainMenu = [[NSMenu alloc] init];
-  NSMenuItem *appItem = [[NSMenuItem alloc] init];
-  [mainMenu addItem:appItem];
+  // App
+  NSMenuItem *appItem = [[NSMenuItem alloc] init]; [mainMenu addItem:appItem];
   NSMenu *appMenu = [[NSMenu alloc] init];
-  [appMenu addItemWithTitle:@"Nascondi" action:@selector(hide:) keyEquivalent:@"h"];
-  [appMenu addItemWithTitle:@"Chiudi finestra" action:@selector(performClose:) keyEquivalent:@"w"];
-  [appMenu addItemWithTitle:@"Esci" action:@selector(terminate:) keyEquivalent:@"q"];
+  [appMenu addItemWithTitle:(it ? @"Informazioni su Gephid" : @"About Gephid") action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];
+  [appMenu addItem:[NSMenuItem separatorItem]];
+  addAct(appMenu, (it ? @"Impostazioni…" : @"Settings…"), @"settings", @",", cmd);
+  [appMenu addItem:[NSMenuItem separatorItem]];
+  [appMenu addItemWithTitle:(it ? @"Nascondi Gephid" : @"Hide Gephid") action:@selector(hide:) keyEquivalent:@"h"];
+  [appMenu addItemWithTitle:(it ? @"Esci da Gephid" : @"Quit Gephid") action:@selector(terminate:) keyEquivalent:@"q"];
   [appItem setSubmenu:appMenu];
-  NSMenuItem *editItem = [[NSMenuItem alloc] init];
-  [mainMenu addItem:editItem];
-  NSMenu *editMenu = [[NSMenu alloc] initWithTitle:@"Modifica"];
-  [editMenu addItemWithTitle:@"Annulla" action:@selector(undo:) keyEquivalent:@"z"];
-  NSMenuItem *r = [editMenu addItemWithTitle:@"Ripeti" action:@selector(redo:) keyEquivalent:@"z"];
-  [r setKeyEquivalentModifierMask:(NSEventModifierFlagCommand|NSEventModifierFlagShift)];
+  // File
+  NSMenuItem *fileItem = [[NSMenuItem alloc] init]; [mainMenu addItem:fileItem];
+  NSMenu *fileMenu = [[NSMenu alloc] initWithTitle:@"File"];
+  addAct(fileMenu, (it ? @"Nuova chat" : @"New Chat"), @"new", @"n", cmd);
+  addAct(fileMenu, (it ? @"Allega file…" : @"Attach Files…"), @"attach", @"o", cmd);
+  [fileMenu addItem:[NSMenuItem separatorItem]];
+  addAct(fileMenu, (it ? @"Salva chat" : @"Save Chat"), @"save", @"s", cmd);
+  addAct(fileMenu, (it ? @"Chat salvate…" : @"Saved Chats…"), @"saved", @"o", cmdShift);
+  addAct(fileMenu, (it ? @"Esporta…" : @"Export…"), @"export", @"e", cmd);
+  [fileMenu addItem:[NSMenuItem separatorItem]];
+  [fileMenu addItemWithTitle:(it ? @"Chiudi finestra" : @"Close Window") action:@selector(performClose:) keyEquivalent:@"w"];
+  [fileItem setSubmenu:fileMenu];
+  // Modifica
+  NSMenuItem *editItem = [[NSMenuItem alloc] init]; [mainMenu addItem:editItem];
+  NSMenu *editMenu = [[NSMenu alloc] initWithTitle:(it ? @"Modifica" : @"Edit")];
+  [editMenu addItemWithTitle:(it ? @"Annulla" : @"Undo") action:@selector(undo:) keyEquivalent:@"z"];
+  NSMenuItem *r = [editMenu addItemWithTitle:(it ? @"Ripeti" : @"Redo") action:@selector(redo:) keyEquivalent:@"z"];
+  [r setKeyEquivalentModifierMask:cmdShift];
   [editMenu addItem:[NSMenuItem separatorItem]];
-  [editMenu addItemWithTitle:@"Taglia" action:@selector(cut:) keyEquivalent:@"x"];
-  [editMenu addItemWithTitle:@"Copia" action:@selector(copy:) keyEquivalent:@"c"];
-  [editMenu addItemWithTitle:@"Incolla" action:@selector(paste:) keyEquivalent:@"v"];
-  [editMenu addItemWithTitle:@"Seleziona tutto" action:@selector(selectAll:) keyEquivalent:@"a"];
-  [editMenu addItem:[NSMenuItem separatorItem]];
-  [editMenu addItemWithTitle:@"Avvia/Ferma dettatura" action:@selector(startDictation:) keyEquivalent:@""];
+  [editMenu addItemWithTitle:(it ? @"Taglia" : @"Cut") action:@selector(cut:) keyEquivalent:@"x"];
+  [editMenu addItemWithTitle:(it ? @"Copia" : @"Copy") action:@selector(copy:) keyEquivalent:@"c"];
+  [editMenu addItemWithTitle:(it ? @"Incolla" : @"Paste") action:@selector(paste:) keyEquivalent:@"v"];
+  [editMenu addItemWithTitle:(it ? @"Seleziona tutto" : @"Select All") action:@selector(selectAll:) keyEquivalent:@"a"];
   [editItem setSubmenu:editMenu];
+  // Vista
+  NSMenuItem *viewItem = [[NSMenuItem alloc] init]; [mainMenu addItem:viewItem];
+  NSMenu *viewMenu = [[NSMenu alloc] initWithTitle:(it ? @"Vista" : @"View")];
+  addAct(viewMenu, (it ? @"Testo più grande" : @"Bigger Text"), @"bigger", @"+", cmd);
+  addAct(viewMenu, (it ? @"Testo più piccolo" : @"Smaller Text"), @"smaller", @"-", cmd);
+  [viewMenu addItem:[NSMenuItem separatorItem]];
+  addAct(viewMenu, (it ? @"Ragiona prima di rispondere" : @"Think Before Answering"), @"think", @"r", cmdShift);
+  addAct(viewMenu, (it ? @"Agente (strumenti locali)" : @"Agent (Local Tools)"), @"agent", @"a", cmdShift);
+  [viewItem setSubmenu:viewMenu];
+  // Finestra
+  NSMenuItem *winItem = [[NSMenuItem alloc] init]; [mainMenu addItem:winItem];
+  NSMenu *winMenu = [[NSMenu alloc] initWithTitle:(it ? @"Finestra" : @"Window")];
+  [winMenu addItemWithTitle:(it ? @"Contrai" : @"Minimize") action:@selector(performMiniaturize:) keyEquivalent:@"m"];
+  [winMenu addItemWithTitle:(it ? @"Ridimensiona" : @"Zoom") action:@selector(performZoom:) keyEquivalent:@""];
+  [winItem setSubmenu:winMenu];
+  [NSApp setWindowsMenu:winMenu];
   [NSApp setMainMenu:mainMenu];
+}
+// La finestra ricorda dimensione e posizione tra un avvio e l'altro (frame salvato da AppKit).
+static void gephidSetupWindow(void *win) {
+  NSWindow *w = (__bridge NSWindow *)win;
+  if (!w) return;
+  [w setMinSize:NSMakeSize(560, 480)];
+  [w setFrameAutosaveName:@"GephidMainWindow"];
 }
 // ---- Riconoscimento vocale on-device (offline) via Speech framework ----
 // La dettatura di sistema non inserisce testo in WKWebView; quindi trascriviamo noi
@@ -96,7 +174,7 @@ static void startSegment(void) {
 }
 // 0 = ok · -1 = recognizer non disponibile · -2 = microfono/audio non avviabile
 // -3 = permesso non ancora deciso (richiesto ora: approvarlo e riprovare) · -4 = permesso negato
-static int gephidDictStart(void) {
+static int gephidDictStart(const char *locale) {
   if (!g_lock) gephidDictInit();
   [g_lock lock]; g_final = @""; g_partial = @""; [g_lock unlock];
   if (g_running) return 0; // già attivo
@@ -114,7 +192,9 @@ static int gephidDictStart(void) {
     return -3;
   }
   if (ma == AVAuthorizationStatusDenied || ma == AVAuthorizationStatusRestricted) return -4;
-  NSLocale *loc = [NSLocale localeWithLocaleIdentifier:@"it-IT"];
+  // lingua della UI (prima era fissa in it-IT anche con l'interfaccia in inglese)
+  NSString *lid = (locale && locale[0]) ? [NSString stringWithUTF8String:locale] : @"it-IT";
+  NSLocale *loc = [NSLocale localeWithLocaleIdentifier:lid];
   g_recog = [[SFSpeechRecognizer alloc] initWithLocale:loc];
   if (!g_recog) g_recog = [[SFSpeechRecognizer alloc] init];
   if (!g_recog || ![g_recog isAvailable]) return -1;
@@ -260,10 +340,13 @@ func killBackend(cmd *exec.Cmd) {
 	if cmd != nil && cmd.Process != nil {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
+	// i programmi lanciati dall'agente hanno un gruppo di processi proprio (per poterli fermare coi
+	// figli): il kill del gruppo del backend non li raggiunge. La loro cartella ha prefisso gephid-run-.
+	_ = exec.Command("pkill", "-9", "-f", "gephid-run-").Run()
 }
 
 // startBackend avvia il backend Python come sottoprocesso: gruppo proprio (killabile coi figli),
-// env pulito (l'env "ricco" di launchd fa impallare l'interprete), log in append su ~/gephid-backend.log.
+// env pulito (l'env "ricco" di launchd fa impallare l'interprete), log in append su ~/Library/Logs/Gephid/backend.log.
 // Ritorna il comando e un canale che riceve l'esito quando il processo muore.
 func startBackend(py, script, home string) (*exec.Cmd, chan error, error) {
 	cmd := exec.Command(py, script)
@@ -274,7 +357,10 @@ func startBackend(py, script, home string) (*exec.Cmd, chan error, error) {
 		"TMPDIR=" + os.TempDir(),
 		"HF_HUB_OFFLINE=1", "TRANSFORMERS_OFFLINE=1", "TOKENIZERS_PARALLELISM=false",
 	}
-	logPath := filepath.Join(home, "gephid-backend.log")
+	// log nella posizione standard di macOS (prima in ~/gephid-backend.log, in mezzo alla home)
+	logDir := filepath.Join(home, "Library", "Logs", "Gephid")
+	_ = os.MkdirAll(logDir, 0755)
+	logPath := filepath.Join(logDir, "backend.log")
 	// rotazione: il log è in append e non veniva mai potato — oltre i 5MB ruota su .old
 	if st, err := os.Stat(logPath); err == nil && st.Size() > 5*1024*1024 {
 		_ = os.Rename(logPath, logPath+".old")
@@ -336,6 +422,14 @@ func safeDispatch(w webview.WebView, closed <-chan struct{}, f func()) {
 	}
 }
 
+// tx: testo nella lingua di macOS (le schermate native compaiono prima che la pagina sappia la lingua)
+func tx(it, en string) string {
+	if C.gephidIsItalian() != 0 {
+		return it
+	}
+	return en
+}
+
 // lucchetto del brand (line-art, inclinato −13.37°) — stesso della UI e della materializzazione
 const logoSVG = `<svg width="62" height="62" viewBox="0 0 24 24" fill="none"><path d="M8 10V7a4 4 0 0 1 8 0v3" stroke="#4169E1" stroke-width="2.1" stroke-linecap="round"></path><rect x="4.6" y="10" width="14.8" height="9.6" rx="3" fill="#4169E1"></rect><circle cx="12" cy="14.4" r="1.5" fill="#070a10"></circle></svg>`
 
@@ -362,7 +456,7 @@ func page(title, msg string, spin bool) string {
 	  .tk{color:#067a45}
 	  code{background:#e9edf3;color:#2f4fc0}
 	}
-	</style></head><body><span class="lk` + pulse + `">` + logoSVG + `</span><div class="t">` + title + `</div><div class="m">` + msg + `</div><div class="tk">NO-NET · 0xLOCAL · NESSUN BYTE ESCE</div></body></html>`
+	</style></head><body><span class="lk` + pulse + `">` + logoSVG + `</span><div class="t">` + title + `</div><div class="m">` + msg + `</div><div class="tk">NO-NET · 0xLOCAL · ` + tx("NESSUN BYTE ESCE", "NO BYTE LEAVES") + `</div></body></html>`
 }
 
 func main() {
@@ -388,10 +482,10 @@ func main() {
 	if !portOpen() {
 		if _, err := os.Stat(py); err != nil {
 			w := webview.New(false)
-			w.SetTitle("Gephid — configurazione mancante")
+			w.SetTitle(tx("Gephid — configurazione mancante", "Gephid — missing setup"))
 			w.SetSize(640, 380, webview.HintNone)
-			w.SetHtml(page("Runtime non trovato",
-				"Non trovo <code>"+html.EscapeString(py)+"</code>.<br><br>Crealo da Terminale con:<br><br><code>python3 -m venv ~/.venv-mlxvlm</code><br><code>~/.venv-mlxvlm/bin/pip install mlx-vlm</code>", false))
+			w.SetHtml(page(tx("Runtime non trovato", "Runtime not found"),
+				tx("Non trovo", "Can't find")+" <code>"+html.EscapeString(py)+"</code>.<br><br>"+tx("Crealo da Terminale con:", "Create it from Terminal with:")+"<br><br><code>python3 -m venv ~/.venv-mlxvlm</code><br><code>~/.venv-mlxvlm/bin/pip install mlx-vlm</code>", false))
 			w.Run()
 			w.Destroy()
 			return
@@ -399,10 +493,10 @@ func main() {
 		c, died, err := startBackend(py, script, home)
 		if err != nil { // non ingoiare l'errore di avvio
 			w := webview.New(false)
-			w.SetTitle("Gephid — avvio fallito")
+			w.SetTitle(tx("Gephid — avvio fallito", "Gephid — startup failed"))
 			w.SetSize(640, 380, webview.HintNone)
-			w.SetHtml(page("Avvio backend fallito",
-				"Non riesco ad avviare il backend Python:<br><br><code>"+html.EscapeString(err.Error())+"</code>", false))
+			w.SetHtml(page(tx("Avvio backend fallito", "Backend failed to start"),
+				tx("Non riesco ad avviare il backend Python:", "Can't start the Python backend:")+"<br><br><code>"+html.EscapeString(err.Error())+"</code>", false))
 			w.Run()
 			w.Destroy()
 			return
@@ -412,10 +506,14 @@ func main() {
 
 	w := webview.New(false)
 	defer w.Destroy()
-	C.installEditMenu() // menu nativo: nome app, Esci (Cmd+Q), Modifica (Cmd C/V/X/A/Z)
+	C.installMenus() // menu nativo bilingue: App, File, Modifica, Vista, Finestra (con scorciatoie)
 	// NB: nessuna richiesta permessi all'avvio. Vengono chiesti solo al primo uso del microfono
 	// (gephidDictStart), e solo se l'utente ha abilitato la dettatura nelle Impostazioni.
-	w.Bind("gephidDictStart", func() int { return int(C.gephidDictStart()) }) // avvia dettatura on-device
+	w.Bind("gephidDictStart", func(locale string) int { // avvia dettatura on-device nella lingua della UI
+		cl := C.CString(locale)
+		defer C.free(unsafe.Pointer(cl))
+		return int(C.gephidDictStart(cl))
+	})
 	w.Bind("gephidDictStop", func() { C.gephidDictStop() })
 	w.Bind("gephidDictReset", func() { C.gephidDictReset() })
 	w.Bind("gephidDictText", func() string { cs := C.gephidDictText(); s := C.GoString(cs); C.free(unsafe.Pointer(cs)); return s })
@@ -441,8 +539,10 @@ func main() {
 	})
 	w.SetTitle("Gephid")
 	w.SetSize(980, 820, webview.HintNone)
-	w.SetHtml(page("Carico Gephid…",
-		"Monto il modello a diffusione in memoria (~15–30s al primo avvio).", true))
+	// DOPO SetSize: SetSize fa setFrame+center e sovrascriverebbe il frame ripristinato dall'autosave
+	C.gephidSetupWindow(w.Window())
+	w.SetHtml(page(tx("Carico Gephid…", "Loading Gephid…"),
+		tx("Avvio il motore locale.", "Starting the local engine."), true))
 
 	closed := make(chan struct{})
 	done := make(chan struct{}) // chiuso quando la goroutine di supervisione è davvero terminata
@@ -464,12 +564,12 @@ func main() {
 					procDied = nil // canale nil: in select non scatta più
 					continue
 				}
-				msg := "Il backend Python si è chiuso inaspettatamente."
+				msg := tx("Il backend Python si è chiuso inaspettatamente.", "The Python backend quit unexpectedly.")
 				if err != nil {
 					msg += "<br><br><code>" + html.EscapeString(err.Error()) + "</code>"
 				}
-				msg += "<br><br>Controlla <code>~/gephid-backend.log</code>."
-				safeDispatch(w, closed, func() { w.SetHtml(page("Backend terminato", msg, false)) })
+				msg += "<br><br>" + tx("Controlla", "Check") + " <code>~/Library/Logs/Gephid/backend.log</code>."
+				safeDispatch(w, closed, func() { w.SetHtml(page(tx("Backend terminato", "Backend stopped"), msg, false)) })
 				return
 			case <-closed:
 				return
@@ -483,12 +583,29 @@ func main() {
 		}
 		if !booted {
 			safeDispatch(w, closed, func() {
-				w.SetHtml(page("Backend non pronto",
-					"Gephid non si è avviata entro 120s. Chiudi e riprova, o controlla i log.", false))
+				w.SetHtml(page(tx("Backend non pronto", "Backend not ready"),
+					tx("Gephid non si è avviata entro 120s. Chiudi e riprova, o controlla i log.", "Gephid didn't start within 120s. Close and retry, or check the logs."), false))
 			})
 			return
 		}
 		safeDispatch(w, closed, func() { w.Navigate(backendURL) })
+		go func() { // azioni dal menu nativo -> gephidMenu('x') nella pagina
+			t := time.NewTicker(100 * time.Millisecond)
+			defer t.Stop()
+			for {
+				select {
+				case <-closed:
+					return
+				case <-t.C:
+				}
+				cs := C.gephidPopMenuAction()
+				a := C.GoString(cs)
+				C.free(unsafe.Pointer(cs))
+				if a != "" && strings.Trim(a, "abcdefghijklmnopqrstuvwxyz") == "" { // solo nomi d'azione noti, mai input arbitrario
+					safeDispatch(w, closed, func() { w.Eval("window.gephidMenu&&gephidMenu('" + a + "')") })
+				}
+			}
+		}()
 
 		// FASE 2 — supervisione: se il backend muore mentre la finestra è aperta, lo riavvio.
 		// La pagina resta caricata e il suo heartbeat (/api/health) fa sparire da solo l'overlay

@@ -17,12 +17,16 @@ Gephid/
 ├── assets/icon.icns          # icon (royalblue padlock, tilted 13.37 degrees)
 ├── src/
 │   ├── backend/
-│   │   ├── diffuchat.py       # backend: HTTP server + model
-│   │   ├── page.html         # UI (HTML/CSS/JS), served from disk on every request
-│   │   └── static/           # vendored libraries: marked, DOMPurify, html2pdf, KaTeX (+ mhchem) + fonts
+│   │   ├── diffuchat.py      # backend: HTTP server + model worker + agent loop
+│   │   ├── channels.py       # splits the model stream: answer / thought / tool calls
+│   │   ├── agent.py          # agent tools: calculator, doc search, working-folder files, code sandbox
+│   │   ├── store.py          # chats saved ON REQUEST (nothing is saved by default)
+│   │   ├── page.html         # UI (HTML/CSS/JS), re-read from disk when it changes
+│   │   └── static/           # vendored libraries: marked, DOMPurify, highlight.js, KaTeX (+ mhchem) + fonts
 │   └── launcher/
 │       ├── main.go           # Go shell + WKWebView + cgo (menu, file/save panel, dictation)
 │       └── go.mod go.sum logo.svg
+├── tests/                    # pytest: pure functions, sandbox, path confinement (no model needed)
 └── Gephid.app                # built artifact (~1GB, not versioned: rebuild with build.sh)
 ```
 
@@ -36,7 +40,7 @@ Gephid/
    the model via `mlx-vlm` and serves the UI and the API. The UI lives in `page.html`, re-read from
    disk on every request.
 3. **`.app` bundle**: embedded Python (`Contents/Resources/python`, from python-build-standalone) +
-   `diffuchat.py` + `page.html` + `static/` + `icon.icns`. Ad-hoc signed.
+   `src/backend/*.py` + `page.html` + `static/` + `icon.icns` + `build-info`. Ad-hoc signed.
 
 ## Constraints not to reintroduce
 - **Model thread**: MLX wants the model ops on the thread that loaded the weights. So
@@ -57,8 +61,25 @@ Gephid/
 - **100% offline**: `HF_HUB_OFFLINE=1`/`TRANSFORMERS_OFFLINE=1`; JS libraries in `/static`; bind to
   `127.0.0.1`; `Origin` + `Host` header checks (anti-CSRF / anti DNS-rebinding). Fail-safe rendering:
   markdown only if `marked` and `DOMPurify` are present, otherwise raw text.
-- **WKWebView**: it cannot download via blob → server-side save (`/api/save`, into `~/Downloads`
-  only). `<input type=file>` does not open the picker → `gephidOpenFiles` (NSOpenPanel via bind);
+- **Model output channels**: the template always opens a thought channel (`<|channel>thought …
+  <channel|>`, empty when thinking is off) and wraps tool calls in `<|tool_call> … <tool_call|>`.
+  Every generation goes through `ChannelSplitter`: never print model output that skipped it.
+- **Instructions and documents in the `system` turn**: the pre-prompt and the chat's documents form a
+  stable prefix; the frontend resends ALL the chat's attachment ids on every turn (a document attached
+  at turn 1 must still count at turn 5). Attachments live in RAM only (LRU); after a backend restart
+  the UI asks to re-attach instead of answering without them. mlx-vlm 0.7.4's prefix cache does not
+  engage with DiffusionGemma (verified), so long documents are re-read each turn.
+- **Nothing is saved unless asked**: the current chat lives in `sessionStorage`; only "Save chat"
+  writes to `~/Library/Application Support/Gephid/chats`.
+- **Agent safety**: tool output is untrusted. File tools are confined to the working folder
+  (`safe_path`, symlinks resolved); writing and running code always need the user's click
+  (`/api/agent/confirm`, 300s without an answer = deny). Code runs under `sandbox-exec`: no outbound
+  connections at all, not even to localhost (otherwise it could drive Gephid's own API), no DNS,
+  LaunchServices or Apple Events, writes only in its temp folder, secrets unreadable, 30s timeout. A
+  server it starts stays reachable from outside, but a process group listening beyond 127.0.0.1 is
+  killed (`lsof` check); leftovers are cleaned up when the backend starts and when Gephid quits.
+- **WKWebView**: it cannot download via blob → server-side save (`/api/save`, `~/Downloads` or the
+  path chosen in the native save panel, home only). `<input type=file>` does not open the picker → `gephidOpenFiles` (NSOpenPanel via bind);
   native panels steal focus, so restore it with `inp.focus()` on return. `alert()/confirm()` do not
   work.
 - **cgo + ARC**: the cgo block is compiled with `-fobjc-arc` (without it, dictation stored an
@@ -72,24 +93,28 @@ Gephid/
   `mlx-community/diffusiongemma-26B-A4B-it-8bit` (~28GB).
 
 ## API (on 127.0.0.1:8890)
-`GET /` UI · `GET /old` legacy UI · `GET /api/health` · `GET /api/models` · `GET /api/config` ·
+`GET /` UI · `GET /api/health` · `GET /api/models` · `GET /api/config` ·
 `GET /static/...` · `POST /api/chat` (NDJSON streaming, `attach`=image/doc ids) · `POST /api/compact`
 (streaming) · `POST /api/ingest` (file→image/doc, OCR for scanned pages — also in mixed PDFs;
 `cancel_token` to abort) · `POST /api/ingest/cancel` · `POST /api/save` (`~/Downloads` by default;
 `path` from the native panel, home-only) · `POST /api/config` (steps/maxtok/ocr/pre-prompt, immediate
 effect) · `POST /api/reload` (hot model reload) · `POST /api/download` (downloads/updates the model;
 the reported total is the delta) · `POST /api/download/pause` · `POST /api/model/check` (local
-revision vs HuggingFace).
+revision vs HuggingFace) · `GET /api/chats` · `POST /api/chats/save|get|delete` (saved chats) ·
+`POST /api/agent/confirm` (allow/deny a tool action) · `GET /api/agent/procs` · `POST /api/agent/stop`.
+`/api/chat` also takes `think` (reasoning) and `agent` (tools) and streams `thought`, `agent`,
+`confirm` and `procs` events.
 
 The network is used **only** by `/api/download` and `/api/model/check`, both on an explicit user
-action: there is no automatic check at startup.
+action: there is no automatic check at startup. No agent tool touches the network.
 
 ## Features
 Streaming + stop · per-session memory (window + cumulative summary) · compact to one prompt · export
 MD/TXT/HTML/PDF · markdown + LaTeX/chemistry (KaTeX) · themes · attachments: images (vision),
 documents txt/md/code/PDF/Word/Excel/CSV (extraction + map-reduce for large ones), scanned pages via
 OCR (3 engines: in-process GLM-OCR by default, Apple Vision, oMLX router; vision as last fallback) ·
-opt-in on-device dictation.
+opt-in on-device dictation · Think (visible reasoning) · Agent (local tools) · chats saved only on
+request · regenerate/edit · highlighted code · native menus with shortcuts.
 
 ## Build
 `./build.sh` assembles `Gephid.app`; `./build.sh --install` also installs it to /Applications. It

@@ -24,23 +24,31 @@ leaves your computer.
 
 ## Features
 - **Streaming chat** with markdown rendered as it types, a live view of the diffusion as each block
-  forms, and a **Stop** button.
-- **Conversation memory**: a rolling window plus an automatic running summary, so long chats never
-  overflow the context.
-- **Attachments**:
-  - Images: the model sees them (vision).
-  - Documents: txt, md, source code, PDF, Word, Excel, CSV. Text is extracted and token-counted;
-    documents too large for the GPU are read in chunks and summarized (map-reduce).
+  forms, and a **Stop** button. **Regenerate** any answer, **edit** any of your messages.
+- **Think** (off by default): the model reasons before answering; you watch the reasoning stream,
+  then it folds into a one-line "Thought · 8s" you can click to reopen.
+- **Agent** (off by default): Gephid can use local tools, none of which touches the network: an exact
+  calculator, search inside the chat's documents, and, in a **working folder you choose**, list/read/
+  search files and **write** them (always with a preview and an Allow/Deny card). It can also run a
+  short **Python or Node** program in a macOS sandbox (no outbound network, writes only to a temp
+  folder, 30s limit), again only after you allow it; long-running servers may listen on 127.0.0.1 only.
+- **Attachments that stay in the conversation**: attach a document once and ask about it as many
+  times as you like.
+  - Images: the model sees them (vision). Paste them with ⌘V.
+  - Documents: txt, md, source code, PDF, Word, Excel, CSV, eml. Documents too large for the GPU are
+    read in chunks and summarized (map-reduce).
   - Scanned PDFs (even mixed text+scan ones): read with on-device OCR — local GLM-OCR by default,
     Apple Vision or an oMLX router selectable from Settings. No network.
-- **Markdown plus LaTeX and chemistry formulas** (KaTeX).
-- **Export** of a whole chat or a single message to MD, TXT, HTML or PDF (saved to `~/Downloads`).
-  PDF and HTML carry a header (model used, export date) and a per-page footer.
+- **Nothing is saved unless you ask.** The current chat survives a reload but disappears when you
+  quit. **Save chat** (⌘S) keeps it, with its documents, in `~/Library/Application Support/Gephid`;
+  **Saved chats** reopens or deletes it.
+- **Markdown plus LaTeX and chemistry formulas** (KaTeX); **highlighted code** with a copy button.
+- **Export** a whole chat or a single message to MD, TXT, HTML or PDF via the native save panel.
 - **Compact to one prompt**: condense the whole conversation into a single prompt you can paste
   elsewhere.
-- **On-device dictation** (offline), opt-in from Settings.
-- **Adjustable reading size**, light/dark/system themes, and **hot-swap** of the model without a
-  restart.
+- **Native Mac app**: full menu bar with shortcuts (⌘N ⌘O ⌘S ⌘E ⌘, ⌘+/⌘−), window that remembers its
+  size, on-device dictation (offline, opt-in), light/dark/system themes, adjustable reading size,
+  English/Italian UI, and **hot-swap** of the model without a restart.
 
 ## How it works
 A small **Go launcher** opens a native window (WKWebView), starts the **Python backend** as a
@@ -53,10 +61,12 @@ the last window closes. Technical details: **[ARCHITECTURE.md](ARCHITECTURE.md)*
 Open **Gephid** (from `/Applications`, or by double-clicking the `.app`). The window appears right
 away with a loading screen while the model loads into memory (a few seconds; longer on the very
 first launch if it still needs to download the weights). Then type, attach files with the paperclip,
-or export and compact from each message's menu.
+or export and compact from the Export menu. Turn on **Think** or **Agent** from the pills next to
+the message field when you need them.
 
 Settings (top right): theme, reading size, dictation, denoising steps (quality vs speed), max
-response tokens, OCR engine, and which **model** to use among those already on your Mac.
+response tokens, OCR engine, the agent's **working folder**, the model instructions, and which
+**model** to use among those already on your Mac.
 
 ## Build from source
 The `.app` is not versioned (it is about 1 GB with the embedded Python); rebuild it from source:
