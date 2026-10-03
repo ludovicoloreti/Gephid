@@ -957,7 +957,7 @@ $('#btnMic').onclick=async()=>{
   if(recording){ stopDict(); return; }
   if(_dictStarting) return;  // gephidDictStart già in volo: evita un secondo avvio dal doppio click
   _dictStarting=true;
-  let r; try{ r=await gephidDictStart(); }catch(e){ r=-2; }  // i bind webview ritornano una Promise: SENZA await r è sempre truthy -> errore fasullo
+  let r; try{ r=await gephidDictStart(LANG==='it'?'it-IT':'en-US'); }catch(e){ r=-2; }  // dettatura nella lingua della UI  // i bind webview ritornano una Promise: SENZA await r è sempre truthy -> errore fasullo
   _dictStarting=false;
   if(r&&r!==0){
     const M={it:{
