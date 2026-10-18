@@ -57,3 +57,21 @@ def test_touch_ingest_lru_protegge_la_chat_in_corso(monkeypatch):
     D._touch_ingest(["a"])      # "a" è della chat in corso: usato di recente
     D._evict_ingest()
     assert "a" in D.INGEST and "b" not in D.INGEST
+
+
+def test_generation_fallback_preserves_image_and_decoding_options(monkeypatch):
+    from mlx_vlm.generate import dispatch, diffusion
+
+    monkeypatch.setattr(diffusion, "is_diffusion_model", lambda model: True)
+    def incompatible(*args):
+        raise TypeError("changed private API")
+    monkeypatch.setattr(dispatch, "_prepare_generation_inputs", incompatible)
+    received = {}
+    def fallback(model, processor, **kwargs):
+        received.update(kwargs)
+        yield "chunk"
+    monkeypatch.setattr(D, "stream_generate", fallback)
+    chunks = []
+    D._run_generation("prompt", {"image": ["image.png"], "skip_special_tokens": True, "max_tokens": 128}, chunks.append)
+    assert received == {"prompt": "prompt", "image": ["image.png"], "skip_special_tokens": True, "max_tokens": 128}
+    assert chunks == ["chunk"]

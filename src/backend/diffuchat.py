@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 diffuchat — chat web per Gephid (text diffusion, MLX).
-Avvio (nel venv mlx-vlm):  ~/.venv-mlxvlm/bin/python src/backend/diffuchat.py
+Avvio dal checkout: .venv/bin/python src/backend/diffuchat.py
 UI: page.html su /. Temi, impostazioni, markdown + KaTeX.
 """
 import http.server, json, threading, time, sys, os, hashlib, base64, subprocess, tempfile, uuid, io, re
@@ -94,7 +94,7 @@ print(f"diffuchat — carico {MODEL} (~30GB)...", flush=True)
 try:
     from mlx_vlm import load, stream_generate
 except Exception as e:
-    print(f"mlx_vlm non importabile (usa il venv ~/.venv-mlxvlm/bin/python).\n   {e}")
+    print(f"mlx_vlm non importabile. Installa requirements.txt nel tuo ambiente Python e riprova.\n   {e}")
     sys.exit(1)
 
 MODELO = PROC = TOK = None
@@ -380,10 +380,10 @@ def _run_generation(formatted, kw, on_chunk):
         from mlx_vlm.generate import dispatch as _D
         from mlx_vlm.generate.diffusion import stream_diffusion_generate_from_kwargs as _sdg, is_diffusion_model as _isd
         if not _isd(MODELO): raise LookupError("non è un modello a diffusione")
-        kw = dict(kw)
-        image = kw.pop("image", None)
-        skip = bool(kw.pop("skip_special_tokens", False))
-        ids, pv, mask, kw = _D._prepare_generation_inputs(MODELO, PROC, formatted, image, None, None, kw)
+        prepared_kw = dict(kw)
+        image = prepared_kw.pop("image", None)
+        skip = bool(prepared_kw.pop("skip_special_tokens", False))
+        ids, pv, mask, prepared_kw = _D._prepare_generation_inputs(MODELO, PROC, formatted, image, None, None, prepared_kw)
     except Exception:
         for c in stream_generate(MODELO, PROC, prompt=formatted, **kw):
             if on_chunk(c) is False: break
@@ -394,7 +394,7 @@ def _run_generation(formatted, kw, on_chunk):
         if on_chunk(c) is False: stop[0] = True
         return not stop[0]
     sids = set(getattr(TOK, "all_special_ids", []) or []) if skip else []
-    for c in _sdg(MODELO, PROC, TOK, ids, pv, mask, sids, kw, skip_special_tokens=skip, on_result=cb):
+    for c in _sdg(MODELO, PROC, TOK, ids, pv, mask, sids, prepared_kw, skip_special_tokens=skip, on_result=cb):
         if cb(c) is False: break  # eventuali risultati restituiti solo a fine generazione
 
 # ---------- Agente: ciclo strumenti (tool calling nativo del template) ----------
@@ -1322,10 +1322,17 @@ _PAGE_CACHE = {"mtime": None, "html": None}
 def _load_new_page():
     try:
         p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "page.html")
-        m = os.path.getmtime(p)  # cache in memoria: rilegge solo se il file cambia (hot-reload in dev, zero I/O in prod)
+        stamp = os.path.join(STATIC_DIR, ".versions")
+        m = (os.stat(p).st_mtime_ns, os.stat(stamp).st_mtime_ns if os.path.isfile(stamp) else 0)
         if _PAGE_CACHE["mtime"] != m:
+            if m[1]:
+                with open(stamp, "rb") as f: version = hashlib.sha256(f.read()).hexdigest()[:12]
+            else:
+                version = format(m[0], "x")
             with open(p, encoding="utf-8") as f:
-                _PAGE_CACHE["html"] = f.read()
+                # Bypassa anche le risorse già memorizzate per un anno dalle vecchie build.
+                _PAGE_CACHE["html"] = re.sub(r'((?:src|href)="/static/[^"?]+)(")',
+                                             rf'\1?v={version}\2', f.read())
             _PAGE_CACHE["mtime"] = m
         return _PAGE_CACHE["html"]
     except Exception as e:
@@ -1383,6 +1390,7 @@ class H(http.server.BaseHTTPRequestHandler):
         else:
             self._send(404, "not found", "text/plain")
     def _serve_static(self, name):
+        name = name.partition("?")[0]  # query di versione emessa da _load_new_page
         # serve file da STATIC_DIR e dalla sola sottocartella fonts/ (KaTeX); niente path traversal
         parts = name.split("/")
         ok = (len(parts) == 1) or (len(parts) == 2 and parts[0] == "fonts")
@@ -1395,12 +1403,16 @@ class H(http.server.BaseHTTPRequestHandler):
         ctype = {".js": "application/javascript", ".css": "text/css",
                  ".woff2": "font/woff2", ".woff": "font/woff", ".ttf": "font/ttf"}.get(ext, "application/octet-stream")
         try:
-            with open(path, "rb") as f: self._send(200, f.read(), ctype, {"Cache-Control": "public, max-age=31536000"})
+            # Gli URL restano uguali tra build: WKWebView deve vedere le nuove librerie.
+            with open(path, "rb") as f: self._send(200, f.read(), ctype, {"Cache-Control": "no-cache"})
         except Exception:
             self._send(404, "not found", "text/plain")
     def do_POST(self):
-        try: n = int(self.headers.get("Content-Length", 0))
-        except (TypeError, ValueError): n = 0
+        try:
+            n = int(self.headers.get("Content-Length", 0))
+            if n < 0: raise ValueError("negative length")
+        except (TypeError, ValueError):
+            self._send(400, json.dumps({"error": "Content-Length non valido."})); return
         if n > 80 * 1024 * 1024:  # limite 80MB (immagini/documenti grandi inclusi)
             self._send(413, json.dumps({"error": "Richiesta troppo grande."})); return
         # Anti-CSRF/DNS-rebinding: una pagina web esterna non può pilotare l'API locale.
@@ -1412,8 +1424,11 @@ class H(http.server.BaseHTTPRequestHandler):
         host = (self.headers.get("Host") or "").rsplit(":", 1)[0]
         if host not in ("localhost", "127.0.0.1"):
             self._send(403, json.dumps({"error": "Host non consentito."})); return
-        try: req = json.loads(self.rfile.read(n)) if n else {}
-        except Exception: req = {}
+        try:
+            req = json.loads(self.rfile.read(n)) if n else {}
+            if not isinstance(req, dict): raise ValueError("expected object")
+        except (ValueError, UnicodeError):
+            self._send(400, json.dumps({"error": "La richiesta deve essere un oggetto JSON valido."})); return
         if self.path == "/api/chat":
             # Risposta in streaming (NDJSON): una riga JSON per blocco generato
             # ({"delta": "..."}), poi {"done":true,"tps":..,"secs":..} o {"error":".."}.

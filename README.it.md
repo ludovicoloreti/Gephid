@@ -81,14 +81,14 @@ modello e quale **modello** usare tra quelli già sul tuo Mac.
 La `.app` non è versionata (pesa circa 1 GB col Python embeddato); si ricrea dai sorgenti:
 ```bash
 cd Gephid
-./build.sh --install      # scarica tutto, assembla Gephid.app e la installa in /Applications
+./build.sh --install      # installa in /Applications, senza lasciare una .app nel checkout
 ```
-`build.sh` è idempotente (riusa un Python embeddato già presente). Guida completa, ciclo di sviluppo
+`build.sh` è idempotente (riusa il runtime già installato). Senza `--install`, produce `dist/Gephid.app`. Checkout e app possono essere spostati: nessun percorso personale è richiesto. Le dipendenze Python sono in `requirements.txt`. Guida completa, ciclo di sviluppo
 rapido e nota su Windows/`.exe`: **[BUILD.it.md](BUILD.it.md)**.
 
 ## Requisiti
 - Mac **Apple Silicon** (M1 o più recente). I Mac Intel non sono supportati: l'inferenza usa MLX, solo Apple Silicon.
-- **macOS 11** o più recente.
+- **macOS 14** o più recente per compilare dai sorgenti. La `.app` può richiedere una versione più recente in base alla wheel MLX inclusa: il requisito effettivo viene scritto in `Info.plist` durante la build.
 - **Disco**: circa 30 GB liberi per il modello (sta in `~/.cache/huggingface/hub`).
 - **Internet solo al primo avvio** per scaricare il modello; poi gira tutto offline. L'unica altra
   volta in cui Gephid tocca la rete è se premi tu **Impostazioni → Modello → Cerca aggiornamenti**:

@@ -27,7 +27,7 @@ Gephid/
 │       ├── main.go           # guscio Go + WKWebView + cgo (menu, file/save panel, dettatura)
 │       └── go.mod go.sum logo.svg
 ├── tests/                    # pytest: funzioni pure, sandbox, confinamento dei percorsi (senza modello)
-└── Gephid.app                # artefatto buildato (~1GB, non versionato: si ricrea con build.sh)
+└── dist/Gephid.app                # artefatto buildato (~1GB, non versionato: si ricrea con build.sh)
 ```
 
 ## Architettura
@@ -105,7 +105,7 @@ Gephid/
   `_degenerate` ferma le ripetizioni patologiche. Frontend: typewriter (rAF) con markdown reso live
   e diffusione visibile mentre il blocco si forma.
 - **Runtime**: solo `mlx-vlm` (mlx-lm dà `Model type diffusion_gemma not supported`); venv di test
-  `~/.venv-mlxvlm`. Velocità (M5 Max, mlx-vlm 0.7.4, 40 step): ~89 tok/s su una risposta lunga,
+  `.venv`. Velocità (M5 Max, mlx-vlm 0.7.4, 40 step): ~89 tok/s su una risposta lunga,
   primo testo dopo il primo blocco (~2,4s), ~135 tok/s con Ragiona. Modello default
   `mlx-community/diffusiongemma-26B-A4B-it-8bit` (~28GB).
 
@@ -135,12 +135,12 @@ locali) · chat salvate solo su richiesta · rigenera/modifica · codice evidenz
 scorciatoie.
 
 ## Build
-`./build.sh` assembla `Gephid.app`; `./build.sh --install` la installa anche in /Applications.
+`./build.sh` assembla `dist/Gephid.app`; `./build.sh --install` usa staging temporaneo e lascia soltanto la copia installata in /Applications.
 Scarica python-build-standalone, fa `pip install` con versioni PINNATE (mlx-vlm, pypdf, python-docx,
 openpyxl, pymupdf, ocrmac) e le librerie JS pinnate, compila il Go, assembla e firma ad-hoc. Due
 stamp — `static/.versions` e `Resources/python/.gephid-deps` — rendono i pin effettivi: se un pin
-cambia si ri-vendorizza o reinstalla, se non cambia si salta tutto (idempotente, ~4s). Per rifare da
-zero: `rm -rf Gephid.app/Contents/Resources/python src/backend/static`. Dettagli in
+cambia si ri-vendorizza o reinstalla, se non cambia si salta tutto (idempotente). Per rifare da
+zero: `rm -rf dist/Gephid.app/Contents/Resources/python src/backend/static`. Dettagli in
 [BUILD.it.md](BUILD.it.md).
 
 ## Requisiti

@@ -2,24 +2,45 @@
 # ============================================================================
 #  Gephid — build completo della .app self-contained (macOS Apple Silicon)
 #  Esegui da dentro la cartella del progetto:   ./build.sh   [--install]
-#  Produce:  ./Gephid.app   (e con --install lo copia in /Applications)
+#  Produce:  ./dist/Gephid.app; --install usa staging temporaneo e lascia solo la copia installata.
 # ============================================================================
 set -euo pipefail
+case "${1:-}" in
+  ""|--install) ;;
+  *) echo "Uso: $0 [--install]" >&2; exit 2 ;;
+esac
+if [ "$(uname -s)" != Darwin ] || [ "$(uname -m)" != arm64 ]; then
+  echo "Gephid richiede macOS su Apple Silicon (arm64)." >&2; exit 1
+fi
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/gephid-build.XXXXXX")"
+trap 'rm -rf "$WORK_DIR"' EXIT
 HERE="$(cd "$(dirname "$0")" && pwd)"
-APP="$HERE/Gephid.app"
+INSTALL_DIR="${GEPHID_INSTALL_DIR:-/Applications}"
+BUILD_DIR="${GEPHID_BUILD_DIR:-$HERE/dist}"
+INSTALLED_APP="$INSTALL_DIR/Gephid.app"
+if [ "${1:-}" = "--install" ]; then
+  APP="$WORK_DIR/Gephid.app"
+else
+  APP="$BUILD_DIR/Gephid.app"
+fi
 MACOS="$APP/Contents/MacOS"
 RESOURCES="$APP/Contents/Resources"
 STATIC="$HERE/src/backend/static"
 PYVER="3.12.15"
-PYTAG="20261003"   # release di astral-sh/python-build-standalone
+PYTAG="20261013"   # release di astral-sh/python-build-standalone
 KVER="0.19.0"      # KaTeX (+ mhchem, stessa versione)
-MARKEDV="18.0.14"   # versioni JS pinnate: build riproducibile (niente "latest" che cambia sotto i piedi)
-PURIFYV="3.4.16"
+MARKEDV="18.1.1"   # versioni JS pinnate: build riproducibile (niente "latest" che cambia sotto i piedi)
+PURIFYV="3.4.17"
 HLJSV="11.12.0"    # highlight.js (bundle "common"): evidenziazione del codice, colori dai token CSS della UI
-# dipendenze Python pinnate (stesso motivo). Per aggiornare: alza qui e rifai il python embeddato.
-# Aggiornati il 04/10/2026: mlx-vlm 0.6.13→0.7.4 (API usate da Gephid invariate, verificato dal vivo),
-# pypdf 6.16.1→6.19.0. python-docx, openpyxl, pymupdf e ocrmac erano già all'ultima.
-PYDEPS="mlx-vlm==0.7.4 pypdf==6.19.0 python-docx==1.2.0 openpyxl==3.1.5 pymupdf==1.28.2 ocrmac==1.0.1"
+# Un'unica lista di dipendenze per build e sviluppo; lo stamp registra i pin effettivi.
+PYDEPS="$(sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' "$HERE/requirements.txt" | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+
+# --install riusa il runtime già installato ma lavora su una copia temporanea:
+# nessuna .app aggiuntiva nel checkout e nessuna modifica al runtime in uso.
+if [ "${1:-}" = "--install" ] && [ -d "$INSTALLED_APP/Contents/Resources/python" ]; then
+  mkdir -p "$RESOURCES"
+  ditto "$INSTALLED_APP/Contents/Resources/python" "$RESOURCES/python"
+fi
 
 echo "==> 1/6  Librerie front-end (vendoring: l'app gira 100% offline)"
 # dl() salta i file già presenti (build idempotente e veloce). Da solo però questo rende i pin
@@ -35,7 +56,16 @@ fi
 mkdir -p "$STATIC/fonts"
 # download atomico: scarica in .part e rinomina solo a esito OK. Senza questo, una rete che cade a
 # metà lascerebbe un file troncato che al giro dopo verrebbe "già presente" e mai più riparato.
-dl(){ [ -f "$2" ] || { echo "    scarico $(basename "$2")"; curl -fsSL -o "$2.part" "$1" && mv "$2.part" "$2" || { rm -f "$2.part"; return 1; }; }; }
+dl(){
+  if [ ! -f "$2" ]; then
+    echo "    scarico $(basename "$2")"
+    if curl -fsSL -o "$2.part" "$1" && mv "$2.part" "$2"; then
+      return 0
+    else
+      rm -f "$2.part"; return 1
+    fi
+  fi
+}
 # marked >= 16 non pubblica più marked.min.js nel root del pacchetto: l'UMD sta in lib/.
 dl "https://cdn.jsdelivr.net/npm/marked@$MARKEDV/lib/marked.umd.js"                 "$STATIC/marked.min.js"
 dl "https://cdn.jsdelivr.net/npm/dompurify@$PURIFYV/dist/purify.min.js"             "$STATIC/purify.min.js"
@@ -66,7 +96,7 @@ if [ -x "$RESOURCES/python/bin/python3" ] && [ -f "$PYSTAMP" ] \
 fi
 if [ ! -x "$RESOURCES/python/bin/python3" ]; then
   echo "    scarico python-build-standalone $PYVER (eseguibile relocabile, NON l'app-stub di sistema)"
-  TB=/tmp/gephid-python.tar.gz
+  TB="$WORK_DIR/python.tar.gz"
   curl -fsSL -o "$TB" "https://github.com/astral-sh/python-build-standalone/releases/download/$PYTAG/cpython-$PYVER+$PYTAG-aarch64-apple-darwin-install_only.tar.gz"
   mkdir -p "$RESOURCES"; rm -rf "$RESOURCES/python"
   tar -xzf "$TB" -C "$RESOURCES"     # crea Resources/python/
@@ -75,19 +105,30 @@ if [ ! -x "$RESOURCES/python/bin/python3" ]; then
 fi
 if [ ! -f "$PYSTAMP" ] || [ "$(tail -1 "$PYSTAMP")" != "$WANT_DEPS" ]; then
   echo "    installo le dipendenze pinnate nel python embeddato"
-  # shellcheck disable=SC2086  # PYDEPS è volutamente word-split (una spec per pacchetto)
-  "$RESOURCES/python/bin/python3" -m pip install -q --upgrade $PYDEPS
+  "$RESOURCES/python/bin/python3" -m pip install -q --upgrade -r "$HERE/requirements.txt"
   printf '%s\n%s' "$WANT_PY" "$WANT_DEPS" > "$PYSTAMP"
 else
   echo "    già allineato ai pin (per rifare tutto: rm -rf '$RESOURCES/python')"
 fi
 
+# Le wheel MLX sono specifiche per la versione di macOS. Il bundle deve dichiarare
+# il minimo del runtime realmente incluso, non il vecchio 11.0 del solo launcher.
+MIN_MACOS="$("$RESOURCES/python/bin/python3" - <<'PY'
+import importlib.util, re, subprocess, sys
+versions = ["14.0"]
+for binary in (sys.executable, importlib.util.find_spec("mlx.core").origin):
+    output = subprocess.check_output(["vtool", "-show-build", binary], text=True)
+    versions.extend(re.findall(r"\bminos\s+([\d.]+)", output))
+print(max(versions, key=lambda value: tuple(map(int, value.split(".")))))
+PY
+)"
+
 echo "==> 3/6  Build del launcher Go (cgo / Cocoa+Speech+AVFoundation)"
-( cd "$HERE/src/launcher" && CGO_ENABLED=1 go build -o /tmp/Gephid . )
+( cd "$HERE/src/launcher" && CGO_ENABLED=1 go build -o "$WORK_DIR/Gephid" . )
 
 echo "==> 4/6  Assemblo il bundle .app"
 mkdir -p "$MACOS" "$RESOURCES"
-cp /tmp/Gephid "$MACOS/Gephid"; chmod +x "$MACOS/Gephid"
+cp "$WORK_DIR/Gephid" "$MACOS/Gephid"; chmod +x "$MACOS/Gephid"
 cp "$HERE"/src/backend/*.py "$RESOURCES/"               # diffuchat.py + moduli (channels, store, agent)
 cp "$HERE/src/backend/page.html" "$RESOURCES/page.html"  # UI (servita su /)
 # etichetta di build: compare in ~/Library/Logs/Gephid/backend.log per sapere quale versione gira
@@ -107,22 +148,24 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleVersion</key><string>2.0</string>
   <key>CFBundleShortVersionString</key><string>2.0</string>
   <key>NSHighResolutionCapable</key><true/>
-  <key>LSMinimumSystemVersion</key><string>11.0</string>
+  <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSMicrophoneUsageDescription</key><string>Gephid usa il microfono per la dettatura vocale offline.</string>
   <key>NSSpeechRecognitionUsageDescription</key><string>Gephid trascrive la tua voce sul dispositivo (offline) per la dettatura.</string>
 </dict></plist>
 PLIST
+/usr/libexec/PlistBuddy -c "Set :LSMinimumSystemVersion $MIN_MACOS" "$APP/Contents/Info.plist"
 
 echo "==> 5/6  Firma ad-hoc"
 codesign --force --deep --sign - "$APP" >/dev/null
 
 if [ "${1:-}" = "--install" ]; then
-  echo "==> 6/6  Installo in /Applications"
+  echo "==> 6/6  Installo in $INSTALL_DIR"
+  mkdir -p "$INSTALL_DIR"
   pkill -9 -f "Gephid.app/Contents/MacOS/Gephid" 2>/dev/null || true; sleep 1  # pattern stretto: solo i processi di Gephid
-  rm -rf /Applications/Gephid.app
-  cp -R "$APP" /Applications/Gephid.app
-  echo "    installato. Apri /Applications/Gephid.app"
+  rm -rf "$INSTALLED_APP"
+  ditto "$APP" "$INSTALLED_APP"
+  echo "    installato. Apri $INSTALLED_APP"
 else
-  echo "==> 6/6  Pronto: $APP  (usa --install per copiarlo in /Applications)"
+  echo "==> 6/6  Pronto: $APP  (usa --install per installarlo in $INSTALL_DIR)"
 fi
 echo "FATTO."

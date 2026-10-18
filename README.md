@@ -78,14 +78,15 @@ response tokens, OCR engine, the agent's **working folder**, the model instructi
 The `.app` is not versioned (it is about 1 GB with the embedded Python); rebuild it from source:
 ```bash
 cd Gephid
-./build.sh --install      # downloads everything, assembles Gephid.app, installs it to /Applications
+./build.sh --install      # installs into /Applications, leaving no app bundle in the checkout
 ```
-`build.sh` is idempotent (it reuses an existing embedded Python). Full guide, quick dev loop and a
-note on Windows/`.exe`: **[BUILD.md](BUILD.md)**.
+`build.sh` is idempotent (it reuses the installed runtime). Without `--install`, it produces
+`dist/Gephid.app`. The checkout and app can be relocated without personal paths. Python dependencies
+are shared in `requirements.txt`. Full guide, quick dev loop and a note on Windows/`.exe`: **[BUILD.md](BUILD.md)**.
 
 ## Requirements
 - **Apple Silicon** Mac (M1 or newer). Intel Macs are not supported: inference uses MLX, which is Apple Silicon only.
-- **macOS 11** or newer.
+- **macOS 14** or newer to build from source. The `.app` may require a newer release depending on the bundled MLX wheel; the build records the actual requirement in `Info.plist`.
 - **Disk**: about 30 GB free for the model (it lives in `~/.cache/huggingface/hub`).
 - **Internet only on first launch** to download the model; everything runs offline afterwards. The
   only other time Gephid touches the network is if *you* press **Settings → Model → Check for

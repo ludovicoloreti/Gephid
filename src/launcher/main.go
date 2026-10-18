@@ -305,10 +305,24 @@ func initPort(home string) {
 	port := 8890
 	if b, err := os.ReadFile(filepath.Join(home, ".config", "diffuchat", "config.json")); err == nil {
 		var c struct {
-			Port int `json:"port"`
+			Port any `json:"port"`
 		}
-		if json.Unmarshal(b, &c) == nil && c.Port > 0 && c.Port < 65536 {
-			port = c.Port
+		if json.Unmarshal(b, &c) == nil {
+			// Stessi tipi e limiti di validate_config nel backend Python.
+			n := float64(port)
+			switch value := c.Port.(type) {
+			case float64:
+				n = value
+			case string:
+				if parsed, err := strconv.Atoi(strings.TrimSpace(value)); err == nil {
+					n = float64(parsed)
+				} else if numErr, ok := err.(*strconv.NumError); ok && numErr.Err == strconv.ErrRange {
+					n = float64(parsed)
+				}
+			case bool:
+				n = 0 // Python int(bool) è 0/1: entrambi diventano 1024.
+			}
+			port = int(max(1024, min(65535, n)))
 		}
 	}
 	backendURL = fmt.Sprintf("http://localhost:%d/", port)
@@ -353,8 +367,9 @@ func startBackend(py, script, home string) (*exec.Cmd, chan error, error) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Env = []string{
 		"HOME=" + home,
-		"PATH=/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+		"PATH=" + backendPath(),
 		"TMPDIR=" + os.TempDir(),
+		"PYTHONDONTWRITEBYTECODE=1", // le risorse della .app firmata devono restare immutabili
 		"HF_HUB_OFFLINE=1", "TRANSFORMERS_OFFLINE=1", "TOKENIZERS_PARALLELISM=false",
 	}
 	// log nella posizione standard di macOS (prima in ~/gephid-backend.log, in mezzo alla home)
@@ -465,13 +480,8 @@ func main() {
 	exe, _ := os.Executable()
 	home, _ := os.UserHomeDir()
 	initPort(home) // porta dal config.json (uguale a quella del backend)
-	res := filepath.Join(filepath.Dir(exe), "..", "Resources")
-	py := filepath.Join(res, "python", "bin", "python3")
-	script := filepath.Join(res, "diffuchat.py")
-	if _, err := os.Stat(py); err != nil { // fallback dev (go run, fuori dal bundle)
-		py = home + "/.venv-mlxvlm/bin/python"
-		script = home + "/Desktop/AI/Gephid/src/backend/diffuchat.py"
-	}
+	workingDir, _ := os.Getwd()
+	py, script, runtimeErr := resolveRuntime(exe, workingDir)
 
 	var bmu sync.Mutex // protegge cmd (il backend corrente può cambiare se viene riavviato)
 	var cmd *exec.Cmd
@@ -480,12 +490,12 @@ func main() {
 	// Avvio il backend solo se la porta è libera. Se è già occupata (istanza
 	// esistente o in boot), la riuso e non la supervisiono: non è mia.
 	if !portOpen() {
-		if _, err := os.Stat(py); err != nil {
+		if runtimeErr != nil {
 			w := webview.New(false)
 			w.SetTitle(tx("Gephid — configurazione mancante", "Gephid — missing setup"))
 			w.SetSize(640, 380, webview.HintNone)
 			w.SetHtml(page(tx("Runtime non trovato", "Runtime not found"),
-				tx("Non trovo", "Can't find")+" <code>"+html.EscapeString(py)+"</code>.<br><br>"+tx("Crealo da Terminale con:", "Create it from Terminal with:")+"<br><br><code>python3 -m venv ~/.venv-mlxvlm</code><br><code>~/.venv-mlxvlm/bin/pip install mlx-vlm</code>", false))
+				html.EscapeString(runtimeErr.Error())+"<br><br>"+tx("Dal checkout, crea l'ambiente di sviluppo:", "From the checkout, create the development environment:")+"<br><br><code>python3 -m venv .venv</code><br><code>.venv/bin/python -m pip install -r requirements.txt</code>", false))
 			w.Run()
 			w.Destroy()
 			return

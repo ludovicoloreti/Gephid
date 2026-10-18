@@ -2,9 +2,12 @@
 __pycache__/
 *.pyc
 *.pyo
+.venv/
+.pytest_cache/
 
 # artefatto buildato: si ricrea con ./build.sh, non va in git (~1GB col python embeddato)
 Gephid.app/
+dist/
 design/
 
 # guida locale e brief di design (non pubblicati)

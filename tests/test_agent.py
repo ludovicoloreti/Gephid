@@ -163,7 +163,7 @@ def test_timeout_uccide_anche_i_figli():
 
 
 def test_sandbox_niente_rm_shell_segnali(tmp_path):
-    vittima = os.path.expanduser("~/Desktop/gephid-test-vittima")
+    vittima = str(tmp_path / "protected")
     os.makedirs(vittima, exist_ok=True)
     open(os.path.join(vittima, "importante.txt"), "w").write("x")
     try:

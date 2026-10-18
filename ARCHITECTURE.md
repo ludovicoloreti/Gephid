@@ -27,7 +27,7 @@ Gephid/
 │       ├── main.go           # Go shell + WKWebView + cgo (menu, file/save panel, dictation)
 │       └── go.mod go.sum logo.svg
 ├── tests/                    # pytest: pure functions, sandbox, path confinement (no model needed)
-└── Gephid.app                # built artifact (~1GB, not versioned: rebuild with build.sh)
+└── dist/Gephid.app                # built artifact (~1GB, not versioned: rebuild with build.sh)
 ```
 
 ## Architecture
@@ -102,7 +102,7 @@ Gephid/
   the `_degenerate` guard stops pathological repetition. Frontend: typewriter (rAF) with markdown
   rendered live and the diffusion visible as the block forms.
 - **Runtime**: `mlx-vlm` only (`mlx-lm` gives `Model type diffusion_gemma not supported`); test venv
-  `~/.venv-mlxvlm`. Speed (M5 Max, mlx-vlm 0.7.4, 40 steps): ~89 tok/s on a long answer,
+  `.venv`. Speed (M5 Max, mlx-vlm 0.7.4, 40 steps): ~89 tok/s on a long answer,
   first text after the first block (~2.4s), ~135 tok/s with Think. Default model
   `mlx-community/diffusiongemma-26B-A4B-it-8bit` (~28GB).
 
@@ -131,13 +131,13 @@ opt-in on-device dictation · Think (visible reasoning) · Agent (local tools) �
 request · regenerate/edit · highlighted code · native menus with shortcuts.
 
 ## Build
-`./build.sh` assembles `Gephid.app`; `./build.sh --install` also installs it to /Applications. It
+`./build.sh` assembles `dist/Gephid.app`; `./build.sh --install` stages the build in a temporary directory and leaves only the installed copy in /Applications. It
 downloads python-build-standalone, runs `pip install` with PINNED versions (mlx-vlm, pypdf,
 python-docx, openpyxl, pymupdf, ocrmac) plus the pinned JS libraries, compiles the Go, assembles and
 signs ad-hoc. Two stamp files — `static/.versions` and `Resources/python/.gephid-deps` — make the
 pins effective: a changed pin triggers re-vendoring or a reinstall, an unchanged one skips everything
-(idempotent, ~4s). To redo from scratch:
-`rm -rf Gephid.app/Contents/Resources/python src/backend/static`. Details in [BUILD.md](BUILD.md).
+(idempotent). To redo from scratch:
+`rm -rf dist/Gephid.app/Contents/Resources/python src/backend/static`. Details in [BUILD.md](BUILD.md).
 
 ## Requirements
 macOS Apple Silicon, ~30GB free for the model (in `~/.cache/huggingface/hub`), Go + Xcode CLT to

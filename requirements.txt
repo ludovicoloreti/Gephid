@@ -1,0 +1,7 @@
+# Runtime macOS Apple Silicon. Condiviso da build.sh e ambiente di sviluppo.
+mlx-vlm==0.7.8
+pypdf==6.21.1
+python-docx==1.2.0
+openpyxl==3.1.5
+pymupdf==1.28.2
+ocrmac==1.0.1
