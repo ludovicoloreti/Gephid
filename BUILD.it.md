@@ -64,6 +64,14 @@ Per collaudare esattamente il runtime installato, crea invece `.venv` con
 e usa `PYTHONDONTWRITEBYTECODE=1` anche per i comandi successivi che usano quell'ambiente.
 L'ultimo controllo di aggiornamento e le prove effettuate sono in [docs/maintenance-2026-10-18.md](docs/maintenance-2026-10-18.md).
 
+Test dello scorrimento della UI con WebKit reale (Node.js 20+, nessun modello necessario):
+```bash
+npm ci
+npx playwright install webkit
+npm run test:ui
+```
+Il server di prova serve soltanto la UI locale e uno stream sintetico; non usa la chat aperta nell'app.
+
 ## Windows: la `.exe`
 
 **Non esiste ancora, e non è un'opzione di `build.sh`.** Gephid è legata a macOS da due dipendenze

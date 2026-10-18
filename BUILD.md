@@ -65,6 +65,14 @@ To test the exact installed runtime, create `.venv` with
 and use `PYTHONDONTWRITEBYTECODE=1` for subsequent commands using that environment too.
 The latest maintenance checks and their scope are recorded in [docs/maintenance-2026-10-18.md](docs/maintenance-2026-10-18.md).
 
+UI scrolling tests with real WebKit (Node.js 20+, no model required):
+```bash
+npm ci
+npx playwright install webkit
+npm run test:ui
+```
+The test server only serves the local UI and a synthetic stream; it does not use the app's open conversation.
+
 ## Windows: the `.exe`
 
 **It does not exist yet, and it is not an option of `build.sh`.** Gephid is tied to macOS by two deep

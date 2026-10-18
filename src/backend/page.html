@@ -518,11 +518,41 @@ const $=s=>document.querySelector(s), el=(t,c)=>{const e=document.createElement(
 const GLYPHS='0123456789ABCDEF<>/\\#@%&*+=:· ';
 const REDUCED_MOTION=window.matchMedia&&matchMedia('(prefers-reduced-motion: reduce)').matches;
 function esc(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
-/* stick-to-bottom: durante lo streaming si auto-scrolla solo se sei già in fondo,
-   così puoi risalire a rileggere mentre genera (force=true per le azioni utente) */
-let stickBottom=true;
-$('#scroll').addEventListener('scroll',()=>{const s=$('#scroll');stickBottom=(s.scrollHeight-s.scrollTop-s.clientHeight)<90;});
-function scrollDown(force){ if(!force&&!stickBottom)return; const s=$('#scroll'); s.scrollTop=s.scrollHeight; }
+/* Il draft cambia altezza durante il denoise: uno scroll causato dal layout non è
+   una richiesta di risalire. Disattiva l'inseguimento solo su un gesto dell'utente,
+   e scorri dopo il layout completo (anche quando cambia senza nuovi token). */
+let stickBottom=true, scrollFrame=0, scrollTouchY=null;
+const chatScroll=$('#scroll');
+chatScroll.addEventListener('wheel',e=>{ if(e.deltaY<0) stickBottom=false; },{passive:true});
+chatScroll.addEventListener('touchstart',e=>{ scrollTouchY=e.touches[0]?.clientY??null; },{passive:true});
+chatScroll.addEventListener('touchmove',e=>{
+  const y=e.touches[0]?.clientY;
+  if(y!=null&&scrollTouchY!=null&&y>scrollTouchY) stickBottom=false;
+  scrollTouchY=y??null;
+},{passive:true});
+chatScroll.addEventListener('pointerdown',e=>{
+  const edge=chatScroll.getBoundingClientRect().right-Math.max(16,chatScroll.offsetWidth-chatScroll.clientWidth);
+  if(e.clientX>=edge) stickBottom=false;  // trascinamento della scrollbar, anche overlay macOS
+});
+document.addEventListener('keydown',e=>{
+  if(e.target.closest&&e.target.closest('input,textarea,[contenteditable]')) return;
+  if(['ArrowUp','PageUp','Home'].includes(e.key)||(e.key===' '&&e.shiftKey)) stickBottom=false;
+});
+chatScroll.addEventListener('scroll',()=>{
+  if(chatScroll.scrollHeight-chatScroll.scrollTop-chatScroll.clientHeight<=4) stickBottom=true;
+});
+function scrollDown(force){
+  if(force) stickBottom=true;
+  if(!stickBottom||scrollFrame) return;
+  scrollFrame=requestAnimationFrame(()=>{
+    scrollFrame=0;
+    if(stickBottom) chatScroll.scrollTop=chatScroll.scrollHeight;
+  });
+}
+if(window.ResizeObserver){
+  const followLayout=new ResizeObserver(()=>scrollDown());
+  followLayout.observe($('#log')); followLayout.observe(chatScroll);
+}
 /* Anti-esfiltrazione: l'output del modello è untrusted (prompt injection nei documenti allegati).
    Nel markdown reso niente risorse né link esterni — src/href restano locali (in aggiunta alla CSP). */
 if(window.DOMPurify){DOMPurify.addHook('afterSanitizeAttributes',function(n){

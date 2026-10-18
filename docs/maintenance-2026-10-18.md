@@ -40,6 +40,16 @@ e `go list -m -u all`.
 - Le destinazioni sono configurabili con `GEPHID_INSTALL_DIR` e `GEPHID_BUILD_DIR`.
 - I test del resolver verificano cartelle rinominate, spazi nei percorsi e scelta dell'interprete. La sandbox viene collaudata su file temporanei.
 
+## Scorrimento durante il denoise
+
+Il vecchio listener interpretava lo spazio aggiunto dalla card del denoise come uno scroll manuale,
+disattivando l'inseguimento. Lo scroll ora viene applicato al frame successivo, dopo l'inserimento
+del contenuto, e segue anche i cambiamenti di altezza rilevati da `ResizeObserver`.
+I gesti dell'utente sospendono l'inseguimento; tornare in fondo lo riattiva.
+Quattro test con WebKit reale verificano inserimento della card, draft che crescono e si accorciano,
+lettura dei messaggi precedenti con ritorno in fondo e ridimensionamento della finestra.
+L'originale falliva tre di questi test; la versione corretta li supera tutti.
+
 ## Verifiche
 
 - 60 test pytest passati nel runtime Python 3.12 della build, senza caricare il modello nei test automatici.
